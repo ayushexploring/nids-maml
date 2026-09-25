@@ -76,10 +76,40 @@ ABLATIONS: dict[str, list[dict]] = {
 # baseline table, which needs the tighter intervals.
 ABLATION_SEEDS = [0, 1, 2]
 
+# --- Group 0: tuning -------------------------------------------------------
+# A short sweep over the two learning rates, run before the matrix so the
+# operating point is chosen on the actual data rather than assumed. The inner
+# learning rate is the decisive one: below a threshold the Transformer base
+# learner does not meta-learn at all, and the threshold is dataset dependent.
+#
+# These runs use a reduced step budget and a single seed, and carry the
+# experiment name "tuning" so that analyse.py keeps them out of the baseline
+# table. They are for choosing a configuration, not for reporting.
+TUNING_META_STEPS = 800
+TUNING_SEED = 0
+TUNING = [
+    {"experiment": "tuning",
+     "algorithm": {"inner_lr": inner_lr, "meta_lr": meta_lr},
+     "train": {"meta_steps": TUNING_META_STEPS, "eval_every": 100,
+               "eval_episodes": 100, "patience": 8},
+     "evaluation": {"test_episodes": 200, "adaptation_curve_steps": 0,
+                    "protocol_b": False}}
+    for inner_lr in (0.01, 0.03, 0.1, 0.3)
+    for meta_lr in (0.001, 0.0003)
+]
+
 
 def build_matrix(groups: set[str]) -> list[dict]:
     """Expand the declared matrix into concrete run specifications."""
     runs: list[dict] = []
+
+    if "tuning" in groups:
+        for spec in TUNING:
+            spec = copy.deepcopy(spec)
+            inner_lr = spec["algorithm"]["inner_lr"]
+            meta_lr = spec["algorithm"]["meta_lr"]
+            tag = _safe(f"tuning_inner{inner_lr}_meta{meta_lr}_seed{TUNING_SEED}")
+            runs.append({"overrides": spec, "seed": TUNING_SEED, "tag": tag})
 
     if "baselines" in groups:
         for spec, seed in itertools.product(BASELINES, SEEDS):
@@ -124,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="print the matrix and exit")
     parser.add_argument("--run", action="store_true", help="execute the matrix")
     parser.add_argument("--only", nargs="*", default=["baselines", "ablations"],
-                        choices=["baselines", "ablations"])
+                        choices=["tuning", "baselines", "ablations"])
     parser.add_argument("--data-path", type=str, required=False)
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--base-config", type=Path,

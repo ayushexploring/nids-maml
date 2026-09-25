@@ -25,7 +25,8 @@ log = logging.getLogger(__name__)
 # Display names for the methods, in the order the baseline table should read.
 METHOD_ORDER = [
     "fomaml", "maml", "reptile", "protonet",
-    "supervised", "classical:random_forest", "classical:gradient_boosting",
+    "supervised", "fomaml+mlp", "fomaml+cnn",
+    "classical:random_forest", "classical:gradient_boosting",
     "classical:logistic",
 ]
 METHOD_LABELS = {
@@ -34,10 +35,31 @@ METHOD_LABELS = {
     "reptile": "Transformer + Reptile",
     "protonet": "Prototypical Networks",
     "supervised": "Transformer, supervised pre-training + fine-tune",
+    "fomaml+mlp": "MLP + FOMAML (no attention)",
+    "fomaml+cnn": "1D-CNN + FOMAML",
     "classical:random_forest": "Random Forest (support set only)",
     "classical:gradient_boosting": "Gradient Boosting (support set only)",
     "classical:logistic": "Logistic Regression (support set only)",
 }
+
+# Only runs from this experiment belong in the baseline table. Tuning sweeps
+# and ablations also carry algorithm name "fomaml", and pooling them into the
+# proposed method's row would silently distort it.
+BASELINE_EXPERIMENT = "primary"
+
+
+def method_key(result: dict) -> str:
+    """Identify a method by its algorithm *and* its encoder.
+
+    The encoder ablation runs FOMAML over an MLP, so keying on the algorithm
+    alone would merge it into the proposed method's row. Classical baselines
+    carry their own name and have no encoder.
+    """
+    algorithm = result["config"]["algorithm"]["name"].lower()
+    if algorithm.startswith("classical:"):
+        return algorithm
+    encoder = result["config"]["model"]["name"].lower()
+    return algorithm if encoder == "transformer" else f"{algorithm}+{encoder}"
 
 
 def load_results(results_dir: Path) -> list[dict]:
@@ -95,7 +117,9 @@ def aggregate_over_seeds(results: list[dict], metric: str = "accuracy") -> dict:
     """
     by_method: dict[str, list[dict]] = defaultdict(list)
     for r in results:
-        by_method[r["config"]["algorithm"]["name"].lower()].append(r)
+        if r["config"]["experiment"] != BASELINE_EXPERIMENT:
+            continue
+        by_method[method_key(r)].append(r)
 
     table = {}
     for method, runs in by_method.items():
@@ -134,7 +158,9 @@ def baseline_comparison(
     """
     by_seed: dict[int, dict[str, dict]] = defaultdict(dict)
     for r in results:
-        by_seed[r["config"]["seed"]][r["config"]["algorithm"]["name"].lower()] = r
+        if r["config"]["experiment"] != BASELINE_EXPERIMENT:
+            continue
+        by_seed[r["config"]["seed"]][method_key(r)] = r
 
     comparisons: dict[str, dict] = {}
     for method in {m for seed in by_seed.values() for m in seed}:
@@ -289,7 +315,9 @@ def adaptation_curves(results: list[dict]) -> dict:
     by_method: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
     for r in results:
         curve = r.get("adaptation_curve") or {}
-        method = r["config"]["algorithm"]["name"].lower()
+        if r["config"]["experiment"] != BASELINE_EXPERIMENT:
+            continue
+        method = method_key(r)
         for steps, summary in curve.items():
             by_method[method][int(steps)].append(summary["accuracy"]["mean"])
     return {
@@ -307,7 +335,7 @@ def protocol_b_table(results: list[dict], method: str = "fomaml") -> dict:
     families: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     wilson: dict[str, list[dict]] = defaultdict(list)
     for r in results:
-        if r["config"]["algorithm"]["name"].lower() != method:
+        if method_key(r) != method or r["config"]["experiment"] != BASELINE_EXPERIMENT:
             continue
         for family, payload in (r.get("protocol_b") or {}).items():
             for metric, interval in payload["per_episode"].items():
