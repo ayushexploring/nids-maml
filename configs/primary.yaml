@@ -25,7 +25,11 @@ train:
   meta_batch_size: 16
   eval_every: 100
   eval_episodes: 200
-  patience: 15
+  # Stops once no evaluation improves on the best by more than min_delta for
+  # `patience` consecutive evaluations. Measured convergence is near step 1200,
+  # so most runs stop well short of meta_steps.
+  patience: 8
+  min_delta: 0.002
 evaluation:
   test_episodes: 600
   adaptation_curve_steps: 10

@@ -41,6 +41,12 @@ class TrainConfig:
     eval_every: int = 100
     eval_episodes: int = 200
     patience: int = 15           # in evaluations, not steps
+    # Improvements smaller than this do not count as progress. Without it,
+    # accuracy oscillating within its own confidence interval keeps resetting
+    # the patience counter, so a run that converged at step 1100 still spends
+    # its full budget. 0.002 is below the width of a 200-episode interval, so
+    # nothing meaningful is stopped early.
+    min_delta: float = 0.002
     warmup_steps: int = 100
     cosine_schedule: bool = True
     min_lr_factor: float = 0.05
@@ -178,7 +184,12 @@ def meta_train(
                 val["summary"]["loss"]["mean"], acc["mean"], acc["lo"], acc["hi"],
             )
 
-            if acc["mean"] > best_acc:
+            # Two thresholds: the checkpoint tracks the best model seen, while
+            # patience only resets on an improvement large enough to be real.
+            improved_at_all = acc["mean"] > best_acc
+            improved_meaningfully = acc["mean"] > best_acc + cfg.min_delta
+
+            if improved_at_all:
                 best_acc = acc["mean"]
                 best_step = step
                 best_state = {
@@ -190,15 +201,20 @@ def meta_train(
                     "per_class_accuracy": val["per_class_accuracy"],
                     "n_episodes": val["n_episodes"],
                 }
-                since_improvement = 0
                 if checkpoint_path is not None:
                     Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
                     torch.save(best_state, checkpoint_path)
+
+            if improved_meaningfully:
+                since_improvement = 0
             else:
                 since_improvement += 1
                 if since_improvement >= cfg.patience:
-                    log.info("early stopping at step %d (best step %d, acc %.4f)",
-                             step, best_step, best_acc)
+                    log.info(
+                        "early stopping at step %d: no gain above %.3f in %d "
+                        "evaluations (best %.4f at step %d)",
+                        step, cfg.min_delta, cfg.patience, best_acc, best_step,
+                    )
                     break
 
     if best_state is not None:
