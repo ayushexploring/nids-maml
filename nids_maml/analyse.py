@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -331,6 +332,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
+    # The tables contain non-ASCII characters and the Windows console defaults
+    # to cp1252, which would raise on printing them. Files are always written
+    # as UTF-8 regardless.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     results = load_results(args.results)
     if not results:
         log.error("no results found in %s", args.results)

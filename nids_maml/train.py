@@ -87,8 +87,15 @@ def evaluate(
     # Accumulated per global class id, to recover per-family performance.
     class_correct: dict[int, list[float]] = {}
 
-    for episode in episodes:
-        out = learner.evaluate_episode(episode, steps=inner_steps)
+    # Learners that can adapt to a whole batch of episodes at once do so;
+    # the rest fall back to the per-episode path. The two produce the same
+    # values, which tests/test_correctness.py asserts.
+    if hasattr(learner, "evaluate_batch"):
+        outputs = learner.evaluate_batch(episodes, steps=inner_steps)
+    else:
+        outputs = [learner.evaluate_episode(ep, steps=inner_steps) for ep in episodes]
+
+    for episode, out in zip(episodes, outputs):
         m = episode_metrics(out["y_true"], out["y_pred"], episode.n_way)
         for key in ("accuracy", "macro_f1", "macro_precision", "macro_recall"):
             per_episode[key].append(m[key])

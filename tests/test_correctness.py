@@ -392,6 +392,25 @@ def test_attention_is_adapted():
         assert delta > 0, f"{name} was not adapted by the inner loop"
 
 
+@check("batched and per-episode evaluation agree")
+def test_batched_evaluation_matches():
+    torch.manual_seed(0)
+    bundle = make_synthetic(n_classes=5, n_features=12, n_per_class=300, seed=0)
+    sampler = EpisodeSampler(bundle.X_test, bundle.y_test, 5, 5, 10, seed=2)
+    episodes = sampler.fixed_set(7, seed=5)
+    model = FTTransformer(12, 5, d_model=32, n_heads=4, n_blocks=2, dropout=0.1)
+    learner = MAML(model, InnerConfig(steps=4, lr=0.1))
+
+    batched = learner.evaluate_batch(episodes, chunk=3)   # chunk < len, so the
+    looped = [learner.evaluate_episode(ep) for ep in episodes]  # chunking path runs
+    assert len(batched) == len(looped) == len(episodes)
+    for b, l in zip(batched, looped):
+        assert np.array_equal(b["y_pred"], l["y_pred"]), (
+            "batched evaluation disagrees with the per-episode path"
+        )
+        assert abs(b["loss"] - l["loss"]) < 1e-4
+
+
 if __name__ == "__main__":
     print()
     print(f"{len(PASSED)} passed, {len(FAILED)} failed")

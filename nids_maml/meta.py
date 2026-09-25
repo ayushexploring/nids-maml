@@ -281,6 +281,67 @@ class MAML:
         self.optimizer.step()
         return {"loss": total_loss, "accuracy": total_acc}
 
+    def evaluate_batch(
+        self, episodes: list[Episode], steps: int | None = None, chunk: int = 32
+    ) -> list[dict]:
+        """Adapt to many episodes at once and return per-episode predictions.
+
+        Evaluation dominates the cost of the experiment matrix: a single run
+        scores several thousand episodes across the meta-test set, the
+        adaptation curve and the per-family protocol. Mapping over episodes
+        here is the same computation as looping, in one batched pass.
+
+        Episodes are processed in chunks so that peak memory stays bounded
+        regardless of how many episodes are requested.
+        """
+        if not episodes:
+            return []
+        self.model.eval()
+        n_steps = self.inner.steps if steps is None else steps
+        buffers = {n: b.detach() for n, b in self.model.named_buffers()}
+        model = self.model
+        base_lr = self.inner.lr
+        lrs = self._current_lrs()
+        if lrs is not None:
+            lrs = {k: v.detach() for k, v in lrs.items()}
+
+        def support_loss(p, x, y):
+            return F.cross_entropy(functional_call(model, {**p, **buffers}, (x,)), y)
+
+        def per_task(p, lrs, sx, sy, qx):
+            for _ in range(n_steps):
+                g = grad(support_loss)(p, sx, sy)
+                p = {
+                    k: p[k] - (lrs[k] if lrs is not None else base_lr) * g[k].detach()
+                    for k in p
+                }
+            return functional_call(model, {**p, **buffers}, (qx,))
+
+        params = {n: p.detach() for n, p in self.model.named_parameters()}
+        results: list[dict] = []
+        for start in range(0, len(episodes), chunk):
+            block = episodes[start:start + chunk]
+            sx, sy, qx, qy = self._stack(block)
+            with torch.enable_grad():
+                logits = vmap(
+                    per_task, in_dims=(None, None, 0, 0, 0), randomness="different"
+                )(params, lrs, sx, sy, qx)
+            with torch.no_grad():
+                probs = logits.softmax(-1)
+                preds = logits.argmax(-1)
+                losses = F.cross_entropy(
+                    logits.reshape(-1, logits.shape[-1]), qy.reshape(-1),
+                    reduction="none",
+                ).view(qy.shape).mean(-1)
+            for i, episode in enumerate(block):
+                results.append({
+                    "y_true": episode.query_y,
+                    "y_pred": preds[i].cpu().numpy(),
+                    "probs": probs[i].cpu().numpy(),
+                    "loss": float(losses[i]),
+                })
+        return results
+
     @torch.enable_grad()
     def evaluate_episode(
         self, episode: Episode, steps: int | None = None

@@ -192,8 +192,11 @@ def run_protocol_b(learner, bundle: DatasetBundle, cfg: dict) -> dict:
         per_episode: dict[str, list[float]] = {}
         pooled_correct = 0
         pooled_total = 0
-        for episode in episodes:
-            out = learner.evaluate_episode(episode)
+        if hasattr(learner, "evaluate_batch"):
+            outputs = learner.evaluate_batch(episodes)
+        else:
+            outputs = [learner.evaluate_episode(ep) for ep in episodes]
+        for out in outputs:
             m = binary_metrics(out["y_true"], out["y_pred"], out["probs"])
             for key, value in m.items():
                 per_episode.setdefault(key, []).append(value)
