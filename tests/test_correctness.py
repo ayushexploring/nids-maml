@@ -411,6 +411,30 @@ def test_batched_evaluation_matches():
         assert abs(b["loss"] - l["loss"]) < 1e-4
 
 
+@check("pre-consolidated label spellings map to the same five classes")
+def test_preconsolidated_labels():
+    # Redistributed copies of CIC-IDS2017 often ship with the fourteen raw
+    # labels already merged, under different spellings. Both forms must land on
+    # the same class inventory, or flows are silently dropped at load time.
+    from nids_maml.data import LABEL_MAP
+
+    raw_form = ["BENIGN", "DDoS", "DoS Hulk", "PortScan",
+                "FTP-Patator", "SSH-Patator", "Web Attack - XSS"]
+    merged_form = ["BENIGN", "DDOS", "PORT SCANNING", "BRUTE FORCE", "WEB ATTACKS"]
+
+    for label in raw_form + merged_form:
+        key = normalise_label(label)
+        assert key in LABEL_MAP, f"{label!r} normalises to {key!r}, absent from LABEL_MAP"
+
+    assert {LABEL_MAP[normalise_label(l)] for l in merged_form} == {
+        "Benign", "DoS/DDoS", "Port Scan", "Brute Force", "Web Attack"
+    }
+    # The two spellings of a family must agree.
+    assert LABEL_MAP[normalise_label("PortScan")] ==            LABEL_MAP[normalise_label("PORT SCANNING")]
+    assert LABEL_MAP[normalise_label("FTP-Patator")] ==            LABEL_MAP[normalise_label("BRUTE FORCE")]
+    assert LABEL_MAP[normalise_label("Web Attack - XSS")] ==            LABEL_MAP[normalise_label("WEB ATTACKS")]
+
+
 if __name__ == "__main__":
     print()
     print(f"{len(PASSED)} passed, {len(FAILED)} failed")

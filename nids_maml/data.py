@@ -46,8 +46,28 @@ LABEL_MAP: dict[str, str] = {
     "WEB ATTACK - SQL INJECTION": "Web Attack",
     # Held out / excluded (see EXCLUDED_CLASSES)
     "BOT": "Bot",
+    "BOTNET": "Bot",
     "INFILTRATION": "Infiltration",
     "HEARTBLEED": "Heartbleed",
+
+    # Pre-consolidated variants. Some redistributed copies of CIC-IDS2017 ship
+    # with the fourteen raw labels already merged into family names, using
+    # spellings that differ from the originals. Mapping them here lets the same
+    # code read either form; the resulting classes are identical.
+    "PORT SCANNING": "Port Scan",
+    "PORTSCANNING": "Port Scan",
+    "PORT SCAN": "Port Scan",
+    "PROBE": "Port Scan",
+    "BRUTE FORCE": "Brute Force",
+    "BRUTEFORCE": "Brute Force",
+    "PATATOR": "Brute Force",
+    "WEB ATTACKS": "Web Attack",
+    "WEB ATTACK": "Web Attack",
+    "WEBATTACK": "Web Attack",
+    "DOS": "DoS/DDoS",
+    "DOS/DDOS": "DoS/DDoS",
+    "DOS-DDOS": "DoS/DDoS",
+    "NORMAL": "Benign",
 }
 
 # Classes carrying too few flows to supply disjoint support and query sets

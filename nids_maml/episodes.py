@@ -81,10 +81,15 @@ class EpisodeSampler:
         self.classes = sorted(self._pool)
 
         if len(self.classes) < n_way:
+            present = {int(c): int((y == c).sum()) for c in sorted(set(y.tolist()))}
             raise ValueError(
                 f"{n_way}-way episodes require {n_way} classes with at least "
-                f"{needed} examples each; only {len(self.classes)} qualify "
-                f"({self.classes})"
+                f"{needed} examples each ({k_shot} support + {n_query} query), "
+                f"but only {len(self.classes)} qualify: {self.classes}.\n"
+                f"Class id -> count in this split: {present}\n"
+                "A class missing here that you expected usually means its label "
+                "spelling is absent from LABEL_MAP in data.py, so its flows were "
+                "dropped at load time -- check the 'unmapped labels' warning above."
             )
 
     @property
