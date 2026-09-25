@@ -1,0 +1,33 @@
+# Primary configuration: 5-way, 5-shot FOMAML with a feature-tokenizing
+# Transformer encoder on CIC-IDS2017. Override data.path on the command line.
+experiment: primary
+data:
+  path: null
+  max_per_class: 60000
+episodes:
+  n_way: 5
+  k_shot: 5
+  n_query: 15
+model:
+  name: transformer
+  d_model: 128
+  n_heads: 4
+  n_blocks: 3
+  dropout: 0.1
+  slot_encoding: sinusoidal
+algorithm:
+  name: fomaml
+  inner_steps: 5
+  inner_lr: 0.1   # see ablation F3; 0.01 fails to bootstrap
+  meta_lr: 0.001
+train:
+  meta_steps: 3000
+  meta_batch_size: 16
+  eval_every: 100
+  eval_episodes: 200
+  patience: 15
+evaluation:
+  test_episodes: 600
+  adaptation_curve_steps: 10
+  protocol_b: true
+seed: 0

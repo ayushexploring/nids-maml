@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Run outputs: results are data, not source. Commit the ones behind the
+# manuscript deliberately (git add -f results/<file>.json), not by default.
+results/
+paper_assets/
+*.pt
+*.h5
+logs/
+
+# Datasets are never committed.
+*.csv
+!configs/*.csv

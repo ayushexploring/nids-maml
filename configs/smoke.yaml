@@ -1,0 +1,16 @@
+# Fast synthetic-data run used to verify the pipeline end to end.
+experiment: smoke
+data:
+  path: null
+train:
+  meta_steps: 60
+  meta_batch_size: 4
+  eval_every: 20
+  eval_episodes: 20
+  patience: 10
+evaluation:
+  test_episodes: 25
+  adaptation_curve_steps: 3
+  adaptation_curve_episodes: 15
+  protocol_b: true
+seed: 0
