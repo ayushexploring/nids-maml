@@ -435,6 +435,53 @@ def test_preconsolidated_labels():
     assert LABEL_MAP[normalise_label("Web Attack - XSS")] ==            LABEL_MAP[normalise_label("WEB ATTACKS")]
 
 
+@check("deduplication collapses near-identical flows and keeps distinct ones")
+def test_deduplication():
+    from nids_maml.data import deduplicate_indices
+
+    rng = np.random.default_rng(0)
+    distinct = rng.normal(0, 5, size=(50, 8))
+    # Each distinct row is repeated with perturbations far below the rounding
+    # precision, exactly the regime CIC-IDS2017 attack bursts produce.
+    noisy = np.repeat(distinct, 4, axis=0)
+    noisy += rng.normal(0, 1e-5, size=noisy.shape)
+
+    kept = deduplicate_indices(noisy, decimals=2)
+    # 200 rows collapse to roughly 50. The grouping is a rounding grid, so a
+    # few groups straddle a grid line and survive as two; the tolerance below
+    # admits that while still failing if deduplication stopped working.
+    assert 50 <= len(kept) <= 55, (
+        f"expected about one representative per distinct flow, kept {len(kept)}"
+    )
+    # Genuinely separate points must all survive.
+    assert len(deduplicate_indices(distinct, decimals=2)) == 50
+
+    # The retained rows must be an index into the original array.
+    assert kept.min() >= 0 and kept.max() < len(noisy)
+    assert len(set(kept.tolist())) == len(kept)
+
+
+@check("deduplication leaves the splits content-disjoint, not just record-disjoint")
+def test_dedup_removes_near_twins():
+    from nids_maml.data import deduplicate_indices
+
+    rng = np.random.default_rng(1)
+    base = rng.normal(0, 3, size=(40, 6))
+    duplicated = np.repeat(base, 5, axis=0) + rng.normal(0, 1e-6, size=(200, 6))
+
+    kept = duplicated[deduplicate_indices(duplicated, decimals=2)]
+    assert len(kept) < 60, f"200 near-identical rows collapsed only to {len(kept)}"
+    # The property that matters: the retained rows are no longer numerically
+    # indistinguishable from one another, which is the condition that fails on
+    # CIC-IDS2017 without this step.
+    d = np.linalg.norm(kept[:, None, :] - kept[None, :, :], axis=-1)
+    np.fill_diagonal(d, np.inf)
+    assert d.min() > 1e-4, (
+        f"two retained flows are still {d.min():.2e} apart; "
+        "deduplication did not separate them"
+    )
+
+
 if __name__ == "__main__":
     print()
     print(f"{len(PASSED)} passed, {len(FAILED)} failed")

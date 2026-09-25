@@ -1,0 +1,43 @@
+# Content-disjoint protocol: groups of near-identical flows are collapsed to a
+# single representative before splitting, so meta-test flows have no numerical
+# twin in meta-train.
+#
+# On CIC-IDS2017 the conventional record-level protocol leaves meta-test flows
+# a median nearest-neighbour distance of ~0.001 standardised units from a
+# training flow, which is indistinguishability rather than similarity. Results
+# under this config are the ones that speak to few-shot generalisation; results
+# under configs/primary.yaml are comparable with the published literature.
+# Both are reported.
+experiment: primary
+data:
+  path: null
+  max_per_class: 60000
+  dedup_decimals: 2
+episodes:
+  n_way: 5
+  k_shot: 5
+  n_query: 15
+model:
+  name: transformer
+  d_model: 128
+  n_heads: 4
+  n_blocks: 3
+  dropout: 0.1
+  slot_encoding: sinusoidal
+algorithm:
+  name: fomaml
+  inner_steps: 5
+  inner_lr: 0.1
+  meta_lr: 0.001
+train:
+  meta_steps: 3000
+  meta_batch_size: 16
+  eval_every: 100
+  eval_episodes: 200
+  patience: 8
+  min_delta: 0.002
+evaluation:
+  test_episodes: 600
+  adaptation_curve_steps: 10
+  protocol_b: true
+seed: 0

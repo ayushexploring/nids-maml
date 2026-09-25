@@ -46,6 +46,9 @@ DEFAULTS: dict = {
         "path": None,              # None -> synthetic, for smoke tests
         "classes": list(PRIMARY_CLASSES),
         "max_per_class": 60000,
+        # None reproduces the conventional record-level protocol. Set to 2 for
+        # the content-disjoint protocol; see data.deduplicate_indices.
+        "dedup_decimals": None,
         "split": {"train": 0.70, "val": 0.15, "test": 0.15},
     },
     "episodes": {"n_way": 5, "k_shot": 5, "n_query": 15},
@@ -120,6 +123,7 @@ def load_data(cfg: dict) -> DatasetBundle:
         split=SplitSpec(**data_cfg["split"]),
         seed=cfg["seed"],
         max_per_class=data_cfg.get("max_per_class"),
+        dedup_decimals=data_cfg.get("dedup_decimals"),
     )
 
 

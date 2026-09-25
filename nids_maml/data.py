@@ -190,6 +190,7 @@ def load_cicids2017(
     max_per_class: int | None = 60_000,
     clip_quantile: float = 0.999,
     drop_constant: bool = True,
+    dedup_decimals: int | None = None,
 ) -> DatasetBundle:
     """Load CIC-IDS2017 and return instance-disjoint meta-splits.
 
@@ -206,6 +207,11 @@ def load_cicids2017(
             Flow Bytes/s and Flow Packets/s columns; clipping at a train-fitted
             quantile keeps standardisation numerically stable.
         drop_constant: drop features with zero variance on the training pool.
+        dedup_decimals: when given, collapse groups of near-identical flows to
+            one representative before splitting, at this rounding precision in
+            standardised units. ``None`` disables it and reproduces the
+            conventional record-level protocol. See :func:`deduplicate_indices`
+            for why this matters on CIC-IDS2017.
 
     Returns:
         A :class:`DatasetBundle` whose splits share no flow record.
@@ -256,6 +262,32 @@ def load_cicids2017(
 
     # Infinities arise in the rate columns when duration is zero.
     X_all[~np.isfinite(X_all)] = np.nan
+
+    # --- optional deduplication, before any split ----------------------------
+    dedup_stats = None
+    if dedup_decimals is not None:
+        before = len(X_all)
+        keep_rows = deduplicate_indices(X_all, decimals=dedup_decimals)
+        removed_per_class = {
+            class_names[c]: int((y_all == c).sum()
+                                - (y_all[keep_rows] == c).sum())
+            for c in range(len(class_names))
+        }
+        X_all, y_all = X_all[keep_rows], y_all[keep_rows]
+        dedup_stats = {
+            "decimals": dedup_decimals,
+            "rows_before": int(before),
+            "rows_after": int(len(X_all)),
+            "removed_fraction": float(1 - len(X_all) / before),
+            "removed_per_class": removed_per_class,
+        }
+        log.info("deduplication at %d decimals: %d -> %d flows (%.1f%% removed)",
+                 dedup_decimals, before, len(X_all),
+                 100 * dedup_stats["removed_fraction"])
+        for name, n in removed_per_class.items():
+            log.info("    %-12s -%d", name, n)
+        if len(X_all) == 0:
+            raise ValueError("deduplication removed every flow")
 
     # --- per-class cap, then stratified instance-level split -----------------
     idx_train, idx_val, idx_test = [], [], []
@@ -328,6 +360,7 @@ def load_cicids2017(
         "clip_quantile": clip_quantile,
         "n_features": len(feature_names),
         "class_names": class_names,
+        "deduplication": dedup_stats,
         "counts": {
             "train": {class_names[i]: int((ytr == i).sum()) for i in range(len(class_names))},
             "val": {class_names[i]: int((yva == i).sum()) for i in range(len(class_names))},
@@ -346,6 +379,73 @@ def load_cicids2017(
     log.info("loaded %s: %d train / %d val / %d test flows, %d features",
              path.name, len(ytr), len(yva), len(yte), bundle.n_features)
     return bundle
+
+
+def deduplicate_indices(
+    X: np.ndarray, decimals: int = 2, keep: str = "first"
+) -> np.ndarray:
+    """Indices of one representative per group of near-identical flows.
+
+    CIC-IDS2017 records one flow per connection, so a single DDoS burst or
+    port-scan sweep contributes thousands of rows whose feature vectors differ
+    negligibly. Splitting such a dataset by row produces meta-splits that are
+    disjoint by record while remaining near-identical in content, and a
+    few-shot result measured on it reflects matching against near-copies rather
+    than generalisation from few examples.
+
+    Flows are grouped by their feature vector rounded to ``decimals`` places
+    after a global standardisation, and one representative is kept per group.
+
+    A note on the global standardisation: it is used *only* to decide which
+    rows are duplicates, never to transform the features that reach the model.
+    Deduplication is a dataset-construction step applied before splitting --
+    the same status as dropping malformed rows -- and the scaler used for
+    modelling is still fitted on the training pool alone. Labels are not
+    consulted, so no target information can move between splits.
+
+    Grouping is by a rounding grid, which is cheap enough to run on the whole
+    dataset but has a boundary effect: two flows separated by less than the
+    precision can still fall either side of a grid line and be kept as two.
+    The effect is small (a few per cent of groups) and its direction is
+    conservative for the conclusions drawn here -- it retains a few near
+    duplicates rather than discarding distinct flows, so the deduplicated
+    protocol is if anything slightly easier than a perfect deduplication would
+    make it. Any gap it leaves therefore understates, never overstates, the
+    difference between the two protocols.
+
+    Args:
+        X: raw feature matrix, non-finite values already imputed.
+        decimals: rounding precision in standardised units. At 2, flows whose
+            standardised features agree to within 0.01 in every dimension are
+            treated as one flow.
+        keep: ``"first"`` keeps the earliest row of each group; ``"random"``
+            picks one uniformly, which avoids any ordering artefact in the
+            source CSVs.
+
+    Returns:
+        Sorted indices of the retained rows.
+    """
+    if keep not in ("first", "random"):
+        raise ValueError(f"keep must be 'first' or 'random', got {keep!r}")
+
+    finite = np.where(np.isfinite(X), X, 0.0)
+    centre = finite.mean(axis=0)
+    spread = finite.std(axis=0)
+    spread = np.where(spread > 1e-12, spread, 1.0)
+    key = np.round((finite - centre) / spread, decimals)
+
+    _, first_index, inverse = np.unique(
+        key, axis=0, return_index=True, return_inverse=True
+    )
+    if keep == "first":
+        return np.sort(first_index)
+
+    rng = np.random.default_rng(0)
+    order = rng.permutation(len(X))
+    chosen: dict[int, int] = {}
+    for row in order:
+        chosen.setdefault(int(inverse[row]), int(row))
+    return np.sort(np.fromiter(chosen.values(), dtype=np.int64))
 
 
 def _assert_disjoint(*index_arrays: np.ndarray) -> None:
