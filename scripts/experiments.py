@@ -38,20 +38,26 @@ SEEDS = [0, 1, 2, 3, 4]
 # is what makes the paired tests in analyse.py valid. The Transformer encoder
 # is held fixed across the meta-learners so that the comparison isolates the
 # meta-learning algorithm and nothing else.
+# Ordered by how much the baseline table depends on each row, because a
+# campaign can be cut short by a session or quota limit at any point. The
+# classical baselines sit early despite being less interesting: they need no
+# meta-training, so they cost a minute or two each and fill table rows almost
+# for free.
 BASELINES = [
     {"experiment": "primary", "algorithm": {"name": "fomaml"}},
-    {"experiment": "primary", "algorithm": {"name": "maml"}},
-    {"experiment": "primary", "algorithm": {"name": "reptile"}},
-    {"experiment": "primary", "algorithm": {"name": "protonet"}},
+    # The control that matters most: same encoder, same label budget, ordinary
+    # supervised pre-training instead of episodic meta-training.
     {"experiment": "primary", "algorithm": {"name": "supervised"}},
     {"experiment": "primary", "algorithm": {"name": "classical:random_forest"}},
     {"experiment": "primary", "algorithm": {"name": "classical:gradient_boosting"}},
     {"experiment": "primary", "algorithm": {"name": "classical:logistic"}},
-    # Encoder ablation kept in this group because it belongs in the same table:
-    # it isolates the contribution of attention while holding the meta-learner
-    # fixed.
+    {"experiment": "primary", "algorithm": {"name": "protonet"}},
+    # Isolates the contribution of attention while holding the meta-learner
+    # fixed; belongs in this table rather than the ablations.
     {"experiment": "primary", "algorithm": {"name": "fomaml"},
      "model": {"name": "mlp"}, "tag_suffix": "mlp"},
+    {"experiment": "primary", "algorithm": {"name": "maml"}},
+    {"experiment": "primary", "algorithm": {"name": "reptile"}},
 ]
 
 # --- Group 2: ablations ----------------------------------------------------
@@ -120,7 +126,10 @@ def build_matrix(groups: set[str]) -> list[dict]:
             runs.append({"overrides": spec, "seed": TUNING_SEED, "tag": tag})
 
     if "baselines" in groups:
-        for spec, seed in itertools.product(BASELINES, SEEDS):
+        # Seed-major, not method-major. A campaign stopped early then leaves a
+        # complete table at fewer seeds, which is reportable, rather than a few
+        # methods at five seeds and the rest missing, which is not.
+        for seed, spec in itertools.product(SEEDS, BASELINES):
             spec = copy.deepcopy(spec)
             suffix = spec.pop("tag_suffix", None)
             algo = spec["algorithm"]["name"]
@@ -131,7 +140,7 @@ def build_matrix(groups: set[str]) -> list[dict]:
 
     if "ablations" in groups:
         for factor, levels in ABLATIONS.items():
-            for level, seed in itertools.product(levels, ABLATION_SEEDS):
+            for seed, level in itertools.product(ABLATION_SEEDS, levels):
                 spec = copy.deepcopy(level)
                 spec["experiment"] = f"ablation_{factor}"
                 spec.setdefault("train", {})["meta_steps"] = ABLATION_META_STEPS
