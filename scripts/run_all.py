@@ -104,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phases", nargs="*", default=list(PHASES), choices=PHASES)
     parser.add_argument("--seeds", type=int, default=5,
                         help="seeds for the baseline table")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="configurations to run concurrently on one GPU")
     parser.add_argument("--skip-dedup-headline", action="store_true",
                         help="run only the record-level headline configuration")
     args = parser.parse_args(argv)
@@ -172,7 +174,8 @@ def main(argv: list[str] | None = None) -> int:
             write_status(out_dir, status)
             break
         rc = run([python, "scripts/experiments.py", "--run", "--only", phase,
-                  "--data-path", args.data_path, "--output-dir", str(out_dir)],
+                  "--data-path", args.data_path, "--output-dir", str(out_dir),
+                  "--workers", str(args.workers)],
                  budget)
         # A non-zero code here means some individual runs failed; the driver
         # records them in failed_runs.json and continues, so the campaign does

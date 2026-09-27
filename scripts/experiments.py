@@ -18,6 +18,8 @@ import copy
 import itertools
 import json
 import logging
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -27,7 +29,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import yaml  # noqa: E402
 
-from nids_maml.run import DEFAULTS, deep_merge, main as run_main  # noqa: E402
+from nids_maml.run import DEFAULTS, deep_merge  # noqa: E402
 
 log = logging.getLogger("experiments")
 
@@ -193,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=REPO_ROOT / "configs" / "primary.yaml")
     parser.add_argument("--meta-steps", type=int, help="override for a quick pass")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="configurations to run concurrently on one GPU")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -216,13 +220,12 @@ def main(argv: list[str] | None = None) -> int:
     completed, skipped, failed = 0, 0, []
     started = time.time()
 
-    for i, spec in enumerate(runs, 1):
-        target = out_dir / f"{spec['tag']}.json"
-        if target.exists():
+    # Build the work list first, so the executor below only sees real work.
+    pending: list[tuple[dict, Path]] = []
+    for spec in runs:
+        if (out_dir / f"{spec['tag']}.json").exists():
             skipped += 1
-            log.info("[%d/%d] %s -- already present, skipping", i, len(runs), spec["tag"])
             continue
-
         cfg = deep_merge(deep_merge(copy.deepcopy(DEFAULTS), base), spec["overrides"])
         cfg["seed"] = spec["seed"]
         if args.data_path:
@@ -231,29 +234,81 @@ def main(argv: list[str] | None = None) -> int:
             cfg["train"]["meta_steps"] = args.meta_steps
         cfg["output_dir"] = str(out_dir)
         cfg["device"] = args.device
-
         config_path = config_dir / f"{spec['tag']}.yaml"
         config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        pending.append((spec, config_path))
 
-        log.info("[%d/%d] %s", i, len(runs), spec["tag"])
-        if args.dry_run:
-            continue
+    log.info("%d runs to execute, %d already present, %d worker(s)",
+             len(pending), skipped, args.workers)
+    if args.dry_run:
+        return 0
 
-        argv_run = ["--config", str(config_path), "--seed", str(spec["seed"]),
-                    "--tag", spec["tag"], "--output-dir", str(out_dir)]
-        try:
-            run_main(argv_run)
-            completed += 1
-        except Exception as exc:  # noqa: BLE001 - one bad run must not stop the matrix
-            log.exception("run failed: %s", spec["tag"])
-            failed.append({"tag": spec["tag"], "error": f"{type(exc).__name__}: {exc}"})
+    # A single run leaves a T4 almost idle: the model is small, so each process
+    # holds a few hundred MiB and the card sits far below capacity. Running
+    # several configurations at once converts that headroom into throughput
+    # without altering any experiment, since the runs are independent and each
+    # writes its own result file. Workers are capped by CPU rather than GPU
+    # memory -- the hosted runtime has two cores, and each process needs one
+    # for data loading, the Python driver and the classical baselines.
+    running: list[tuple[dict, subprocess.Popen, Path]] = []
+    queue = list(pending)
+    launched = 0
 
-        elapsed = time.time() - started
-        done = completed + skipped
-        if done:
-            remaining = (len(runs) - i) * (elapsed / max(completed, 1))
-            log.info("     elapsed %.1f min, ~%.1f min remaining",
-                     elapsed / 60, remaining / 60)
+    env = dict(os.environ)
+    # Each worker keeps to one thread; oversubscribing two cores across several
+    # processes makes every one of them slower.
+    env["OMP_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+
+    def launch(spec: dict, config_path: Path) -> None:
+        nonlocal launched
+        launched += 1
+        log_path = out_dir / "run_logs" / f"{spec['tag']}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [sys.executable, "-u", "-m", "nids_maml.run",
+               "--config", str(config_path), "--seed", str(spec["seed"]),
+               "--tag", spec["tag"], "--output-dir", str(out_dir)]
+        handle = open(log_path, "w", encoding="utf-8")
+        proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=env,
+                                stdout=handle, stderr=subprocess.STDOUT)
+        running.append((spec, proc, log_path))
+        log.info("[%d/%d] started %s (pid %d)",
+                 launched, len(pending), spec["tag"], proc.pid)
+
+    while queue or running:
+        while queue and len(running) < args.workers:
+            spec, config_path = queue.pop(0)
+            launch(spec, config_path)
+
+        time.sleep(5)
+
+        for entry in list(running):
+            spec, proc, log_path = entry
+            if proc.poll() is None:
+                continue
+            running.remove(entry)
+            if proc.returncode == 0 and (out_dir / f"{spec['tag']}.json").exists():
+                completed += 1
+                log.info("     done %s  (%d/%d complete)",
+                         spec["tag"], completed, len(pending))
+            else:
+                tail = ""
+                try:
+                    tail = "".join(log_path.read_text(
+                        encoding="utf-8", errors="replace").splitlines(True)[-15:])
+                except OSError:
+                    pass
+                log.error("run failed: %s (exit %s)\n%s",
+                          spec["tag"], proc.returncode, tail)
+                failed.append({"tag": spec["tag"], "exit_code": proc.returncode,
+                               "log": str(log_path), "tail": tail})
+
+            elapsed = time.time() - started
+            if completed:
+                per_run = elapsed / completed
+                left = (len(pending) - completed - len(failed)) * per_run / args.workers
+                log.info("     elapsed %.1f min | %.1f min/run | ~%.1f min remaining",
+                         elapsed / 60, per_run / 60, left / 60)
 
     log.info("matrix finished: %d completed, %d skipped, %d failed",
              completed, skipped, len(failed))
