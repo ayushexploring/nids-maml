@@ -482,6 +482,40 @@ def test_dedup_removes_near_twins():
     )
 
 
+@check("classical baselines clear chance at the episodic label budget")
+def test_classical_baselines_are_fairly_configured():
+    # Library defaults assume thousands of rows. On a 25-row support set some
+    # of them cannot split at all and return the prior class, which looks like
+    # a weak baseline but is really a misconfigured one. Separable synthetic
+    # data makes the distinction unambiguous: anything at chance here is broken.
+    from nids_maml.baselines import ClassicalBaseline
+
+    bundle = make_synthetic(n_classes=5, n_features=20, n_per_class=400,
+                            seed=0, separation=2.0)
+    sampler = EpisodeSampler(bundle.X_test, bundle.y_test, 5, 5, 15, seed=0)
+    episodes = sampler.fixed_set(20, seed=0)
+    chance = 1.0 / 5
+
+    for kind in ("random_forest", "gradient_boosting", "logistic"):
+        learner = ClassicalBaseline(kind=kind, seed=0)
+        accuracies, predicted_classes = [], set()
+        for ep in episodes:
+            out = learner.evaluate_episode(ep)
+            accuracies.append(float((out["y_pred"] == out["y_true"]).mean()))
+            predicted_classes.update(np.unique(out["y_pred"]).tolist())
+        mean_acc = float(np.mean(accuracies))
+
+        assert mean_acc > chance * 2, (
+            f"{kind} scored {mean_acc:.4f} on separable data, barely above the "
+            f"{chance:.2f} chance level -- it is misconfigured for a "
+            f"{len(episodes[0].support_y)}-row support set, not merely weak"
+        )
+        assert len(predicted_classes) > 1, (
+            f"{kind} predicted only class(es) {predicted_classes} across every "
+            "episode, the signature of a model that could not fit at all"
+        )
+
+
 if __name__ == "__main__":
     print()
     print(f"{len(PASSED)} passed, {len(FAILED)} failed")

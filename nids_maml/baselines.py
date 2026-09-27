@@ -145,12 +145,30 @@ class ClassicalBaseline:
         self.inner = InnerConfig(steps=0, lr=0.0)
 
     def _fresh(self):
+        """A classifier configured for the episodic label budget.
+
+        Library defaults assume thousands of rows. Here the whole training set
+        is ``n_way * k_shot`` -- 25 rows at the primary setting -- so several
+        defaults silently prevent the model from fitting anything at all. A
+        baseline crippled by its own configuration is worse than no baseline,
+        because it understates the comparison rather than losing it fairly.
+        """
         if self.kind == "random_forest":
             return RandomForestClassifier(
                 n_estimators=300, random_state=self.seed, n_jobs=-1
             )
         if self.kind == "gradient_boosting":
-            return HistGradientBoostingClassifier(random_state=self.seed)
+            return HistGradientBoostingClassifier(
+                random_state=self.seed,
+                # The default of 20 exceeds the entire support set, so no split
+                # is ever valid and every query gets the prior class -- which
+                # shows up as exactly chance accuracy with zero variance.
+                min_samples_leaf=1,
+                max_iter=200,
+                # Holding out an internal validation split from 25 rows would
+                # remove most of the signal.
+                early_stopping=False,
+            )
         if self.kind == "logistic":
             return LogisticRegression(max_iter=2000, random_state=self.seed)
         raise ValueError(f"unknown classical baseline '{self.kind}'")
