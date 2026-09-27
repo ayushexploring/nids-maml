@@ -19,6 +19,7 @@ for both meta-training and evaluation.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -29,6 +30,8 @@ import torch.nn.functional as F
 from torch.func import functional_call, grad, grad_and_value, vmap
 
 from .episodes import Episode
+
+log = logging.getLogger(__name__)
 
 ParamDict = dict[str, torch.Tensor]
 
@@ -135,16 +138,19 @@ class MAML:
         grad_clip: float | None = 1.0,
         device: torch.device | str = "cpu",
         vectorized: bool = True,
-        meta_chunk: int = 4,
+        meta_chunk: int = 2,
+        first_order_chunk: int = 8,
     ) -> None:
         self.model = model.to(device)
         self.inner = inner
         self.device = torch.device(device)
         self.grad_clip = grad_clip
         self.vectorized = vectorized
-        # Tasks per chunk when the second-order graph is retained. Only used
-        # when first_order is False; see _meta_step_vectorized.
+        # Tasks per chunk. Second-order steps retain the adaptation graph and
+        # need a smaller chunk than first-order ones. Both are lowered
+        # automatically if the allocator refuses; see meta_step.
         self.meta_chunk = meta_chunk
+        self.first_order_chunk = first_order_chunk
 
         self.inner_lrs: ParamDict | None = None
         trainable: list[torch.Tensor] = list(self.model.parameters())
@@ -232,7 +238,8 @@ class MAML:
         # identical because the meta-objective is a mean over independent
         # tasks. First-order runs detach the inner gradients, so they hold no
         # trajectory and need no chunking.
-        chunk = len(episodes) if first_order else min(self.meta_chunk, len(episodes))
+        chunk = min(self.meta_chunk if not first_order else self.first_order_chunk,
+                    len(episodes))
 
         accumulated: ParamDict = {n: torch.zeros_like(p) for n, p in params.items()}
         accumulated_lr: ParamDict | None = (
@@ -280,11 +287,38 @@ class MAML:
         return {"loss": total_loss, "accuracy": total_acc}
 
     def meta_step(self, episodes: list[Episode]) -> dict[str, float]:
-        """One outer update over a meta-batch. Returns loss and accuracy."""
-        self.model.train()
-        if self.vectorized:
-            return self._meta_step_vectorized(episodes)
+        """One outer update over a meta-batch. Returns loss and accuracy.
 
+        Several runs share one GPU, so the memory a step needs depends on what
+        the neighbouring processes are doing and cannot be fixed in advance.
+        Rather than pick a conservative constant that slows every run, the step
+        halves its chunk size and retries when the allocator refuses, keeping
+        the reduced size for the rest of the run. The gradient is unaffected:
+        chunking only changes how the mean over independent tasks is
+        accumulated.
+        """
+        self.model.train()
+        if not self.vectorized:
+            return self._meta_step_sequential(episodes)
+
+        while True:
+            try:
+                return self._meta_step_vectorized(episodes)
+            except torch.OutOfMemoryError:
+                attr = ("first_order_chunk" if self.inner.first_order
+                        else "meta_chunk")
+                current = getattr(self, attr)
+                if current <= 1:
+                    raise
+                setattr(self, attr, max(1, current // 2))
+                torch.cuda.empty_cache()
+                log.warning(
+                    "CUDA OOM at %s=%d; retrying at %d for the rest of this run",
+                    attr, current, getattr(self, attr),
+                )
+
+    def _meta_step_sequential(self, episodes: list[Episode]) -> dict[str, float]:
+        """One task at a time. Used by Reptile and as a low-memory fallback."""
         self.optimizer.zero_grad(set_to_none=True)
 
         params = clone_params(self.model)
