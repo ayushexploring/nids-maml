@@ -191,6 +191,7 @@ def load_cicids2017(
     clip_quantile: float = 0.999,
     drop_constant: bool = True,
     dedup_decimals: int | None = None,
+    cache_dir: str | Path | None = None,
 ) -> DatasetBundle:
     """Load CIC-IDS2017 and return instance-disjoint meta-splits.
 
@@ -219,6 +220,21 @@ def load_cicids2017(
     split = split or SplitSpec()
     path = Path(path)
     rng = np.random.default_rng(seed)
+
+    # Parsing and preprocessing the CSV costs far more than the training step
+    # it feeds when many short runs share one machine, and the hosted runtime
+    # has two cores, so concurrent workers serialise on it. The result is a
+    # deterministic function of the arguments below, so it is cached to disk
+    # and reused. Disk is the one resource these runtimes have to spare.
+    cached = _cache_path(cache_dir, path, classes, split, seed, max_per_class,
+                         clip_quantile, drop_constant, dedup_decimals)
+    if cached is not None and cached.exists():
+        try:
+            bundle = _load_cached(cached)
+            log.info("loaded %s from cache (%s)", path.name, cached.name)
+            return bundle
+        except (OSError, KeyError, ValueError) as exc:
+            log.warning("cache at %s unusable (%s); rebuilding", cached, exc)
 
     df = _read_csvs(path)
     label_col = _find_label_column(df)
@@ -378,6 +394,8 @@ def load_cicids2017(
     )
     log.info("loaded %s: %d train / %d val / %d test flows, %d features",
              path.name, len(ytr), len(yva), len(yte), bundle.n_features)
+    if cached is not None:
+        _save_cached(bundle, cached)
     return bundle
 
 
@@ -446,6 +464,67 @@ def deduplicate_indices(
     for row in order:
         chosen.setdefault(int(inverse[row]), int(row))
     return np.sort(np.fromiter(chosen.values(), dtype=np.int64))
+
+
+def _cache_path(
+    cache_dir, path, classes, split, seed, max_per_class,
+    clip_quantile, drop_constant, dedup_decimals,
+) -> Path | None:
+    """Deterministic cache filename for one loader configuration.
+
+    The source file's size and modification time are part of the key, so
+    replacing the dataset invalidates the cache rather than silently serving
+    stale splits.
+    """
+    if cache_dir is None:
+        return None
+    try:
+        stat = Path(path).stat()
+        stamp = (int(stat.st_size), int(stat.st_mtime))
+    except OSError:
+        stamp = (0, 0)
+    payload = json.dumps({
+        "path": str(path), "stamp": stamp, "classes": list(classes),
+        "split": asdict(split), "seed": seed, "max_per_class": max_per_class,
+        "clip_quantile": clip_quantile, "drop_constant": drop_constant,
+        "dedup_decimals": dedup_decimals, "format": 1,
+    }, sort_keys=True)
+    key = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    directory = Path(cache_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"bundle_{key}.npz"
+
+
+def _save_cached(bundle: DatasetBundle, target: Path) -> None:
+    """Write a bundle atomically, so a killed run cannot leave a partial file."""
+    tmp = target.with_suffix(".tmp.npz")
+    try:
+        np.savez(
+            tmp,
+            X_train=bundle.X_train, y_train=bundle.y_train,
+            X_val=bundle.X_val, y_val=bundle.y_val,
+            X_test=bundle.X_test, y_test=bundle.y_test,
+            class_names=np.array(bundle.class_names, dtype=object),
+            feature_names=np.array(bundle.feature_names, dtype=object),
+            meta=np.array(json.dumps(bundle.meta), dtype=object),
+        )
+        tmp.replace(target)
+        log.info("cached preprocessed splits to %s", target.name)
+    except OSError as exc:
+        log.warning("could not write cache %s: %s", target, exc)
+        tmp.unlink(missing_ok=True)
+
+
+def _load_cached(source: Path) -> DatasetBundle:
+    with np.load(source, allow_pickle=True) as z:
+        return DatasetBundle(
+            X_train=z["X_train"], y_train=z["y_train"],
+            X_val=z["X_val"], y_val=z["y_val"],
+            X_test=z["X_test"], y_test=z["y_test"],
+            class_names=list(z["class_names"]),
+            feature_names=list(z["feature_names"]),
+            meta=json.loads(str(z["meta"])),
+        )
 
 
 def _assert_disjoint(*index_arrays: np.ndarray) -> None:

@@ -104,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--phases", nargs="*", default=list(PHASES), choices=PHASES)
     parser.add_argument("--seeds", type=int, default=5,
                         help="seeds for the baseline table")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="directory for cached preprocessed splits")
     parser.add_argument("--workers", type=int, default=2,
                         help="configurations to run concurrently on one GPU")
     parser.add_argument("--skip-dedup-headline", action="store_true",
@@ -158,7 +160,9 @@ def main(argv: list[str] | None = None) -> int:
                 break
             rc = run([python, "-m", "nids_maml.run", "--config", config,
                       "--data-path", args.data_path, "--output-dir", str(out_dir),
-                      "--tag", tag, "--seed", "0"], budget)
+                      "--tag", tag, "--seed", "0"]
+                     + (["--cache-dir", args.cache_dir] if args.cache_dir else []),
+                     budget)
             results[tag] = "ok" if rc == 0 else "failed"
         status["phases"]["headline"] = results
         write_status(out_dir, status)
@@ -175,7 +179,8 @@ def main(argv: list[str] | None = None) -> int:
             break
         rc = run([python, "scripts/experiments.py", "--run", "--only", phase,
                   "--data-path", args.data_path, "--output-dir", str(out_dir),
-                  "--workers", str(args.workers)],
+                  "--workers", str(args.workers)]
+                 + (["--cache-dir", args.cache_dir] if args.cache_dir else []),
                  budget)
         # A non-zero code here means some individual runs failed; the driver
         # records them in failed_runs.json and continues, so the campaign does

@@ -9,6 +9,7 @@ Run with:  python -m tests.test_correctness
 
 from __future__ import annotations
 
+import pathlib
 import sys
 
 import numpy as np
@@ -513,6 +514,41 @@ def test_classical_baselines_are_fairly_configured():
         assert len(predicted_classes) > 1, (
             f"{kind} predicted only class(es) {predicted_classes} across every "
             "episode, the signature of a model that could not fit at all"
+        )
+
+
+@check("the split cache round-trips exactly and is keyed by configuration")
+def test_split_cache():
+    import tempfile
+    import pandas as pd
+    from nids_maml.data import load_cicids2017, fingerprint
+
+    rng = np.random.default_rng(0)
+    rows, names = [], ["BENIGN", "DDoS", "PortScan", "FTP-Patator", "Web Attack - XSS"]
+    for label in names:
+        for _ in range(200):
+            rows.append({f"f{i}": float(rng.normal()) for i in range(8)} | {"Label": label})
+
+    with tempfile.TemporaryDirectory() as tmp:
+        csv = pathlib.Path(tmp) / "flows.csv"
+        pd.DataFrame(rows).to_csv(csv, index=False)
+        cache = pathlib.Path(tmp) / "cache"
+
+        first = load_cicids2017(csv, seed=0, max_per_class=None, cache_dir=cache)
+        files = list(cache.glob("bundle_*.npz"))
+        assert len(files) == 1, f"expected one cache file, found {len(files)}"
+
+        second = load_cicids2017(csv, seed=0, max_per_class=None, cache_dir=cache)
+        assert fingerprint(first) == fingerprint(second), (
+            "cached splits differ from the freshly computed ones"
+        )
+        assert first.class_names == second.class_names
+        assert first.feature_names == second.feature_names
+
+        # A different configuration must not collide with the cached entry.
+        load_cicids2017(csv, seed=1, max_per_class=None, cache_dir=cache)
+        assert len(list(cache.glob("bundle_*.npz"))) == 2, (
+            "a different seed reused the same cache entry"
         )
 
 

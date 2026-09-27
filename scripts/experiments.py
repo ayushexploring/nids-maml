@@ -195,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=REPO_ROOT / "configs" / "primary.yaml")
     parser.add_argument("--meta-steps", type=int, help="override for a quick pass")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--cache-dir", type=str, default=None,
+                        help="directory for cached preprocessed splits")
     parser.add_argument("--workers", type=int, default=2,
                         help="configurations to run concurrently on one GPU")
     parser.add_argument("--dry-run", action="store_true")
@@ -234,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
             cfg["train"]["meta_steps"] = args.meta_steps
         cfg["output_dir"] = str(out_dir)
         cfg["device"] = args.device
+        if args.cache_dir:
+            cfg["data"]["cache_dir"] = args.cache_dir
         config_path = config_dir / f"{spec['tag']}.yaml"
         config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         pending.append((spec, config_path))

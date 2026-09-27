@@ -49,6 +49,10 @@ DEFAULTS: dict = {
         # None reproduces the conventional record-level protocol. Set to 2 for
         # the content-disjoint protocol; see data.deduplicate_indices.
         "dedup_decimals": None,
+        # Preprocessed splits are cached here and reused across runs. Point it
+        # at local disk, not a network mount, or the cache costs more than it
+        # saves.
+        "cache_dir": None,
         "split": {"train": 0.70, "val": 0.15, "test": 0.15},
     },
     "episodes": {"n_way": 5, "k_shot": 5, "n_query": 15},
@@ -124,6 +128,7 @@ def load_data(cfg: dict) -> DatasetBundle:
         seed=cfg["seed"],
         max_per_class=data_cfg.get("max_per_class"),
         dedup_decimals=data_cfg.get("dedup_decimals"),
+        cache_dir=data_cfg.get("cache_dir"),
     )
 
 
@@ -224,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, help="YAML config file")
     parser.add_argument("--seed", type=int, help="override config seed")
     parser.add_argument("--data-path", type=str, help="override data.path")
+    parser.add_argument("--cache-dir", type=str,
+                        help="directory for cached preprocessed splits")
     parser.add_argument("--output-dir", type=str, help="override output_dir")
     parser.add_argument("--tag", type=str, default="", help="suffix for the result filename")
     parser.add_argument("--meta-steps", type=int, help="override train.meta_steps")
@@ -244,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg["seed"] = args.seed
     if args.data_path:
         cfg["data"]["path"] = args.data_path
+    if args.cache_dir:
+        cfg["data"]["cache_dir"] = args.cache_dir
     if args.output_dir:
         cfg["output_dir"] = args.output_dir
     if args.meta_steps is not None:
