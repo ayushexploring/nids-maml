@@ -552,6 +552,36 @@ def test_split_cache():
         )
 
 
+@check("chunking the second-order meta-batch does not change the gradient")
+def test_second_order_chunking_is_exact():
+    # Chunking exists to bound peak memory when the adaptation graph is
+    # retained. It is only legitimate if the accumulated gradient matches the
+    # unchunked one, since the meta-objective is a mean over independent tasks.
+    bundle = make_synthetic(n_classes=5, n_features=12, n_per_class=200, seed=0)
+    sampler = EpisodeSampler(bundle.X_train, bundle.y_train, 5, 5, 8, seed=0)
+    episodes = sampler.fixed_set(6, seed=0)
+
+    def meta_gradient(chunk: int) -> torch.Tensor:
+        torch.manual_seed(0)
+        model = FTTransformer(12, 5, d_model=32, n_heads=4, n_blocks=1, dropout=0.0)
+        learner = MAML(model, InnerConfig(steps=2, lr=0.05, first_order=False),
+                       meta_lr=0.01, grad_clip=None, meta_chunk=chunk)
+        learner.model.eval()
+        captured: dict[str, torch.Tensor] = {}
+        learner.optimizer.step = lambda *a, **k: captured.update(
+            {n: p.grad.detach().clone() for n, p in learner.model.named_parameters()})
+        learner.meta_step(episodes)
+        return torch.cat([captured[k].flatten() for k in sorted(captured)])
+
+    whole = meta_gradient(6)     # one chunk: the whole meta-batch
+    split = meta_gradient(2)     # three chunks
+    relative = ((whole - split).norm() / whole.norm()).item()
+    assert relative < 1e-5, (
+        f"chunked and unchunked second-order meta-gradients differ by "
+        f"{relative:.2e} relative"
+    )
+
+
 if __name__ == "__main__":
     print()
     print(f"{len(PASSED)} passed, {len(FAILED)} failed")

@@ -135,12 +135,16 @@ class MAML:
         grad_clip: float | None = 1.0,
         device: torch.device | str = "cpu",
         vectorized: bool = True,
+        meta_chunk: int = 4,
     ) -> None:
         self.model = model.to(device)
         self.inner = inner
         self.device = torch.device(device)
         self.grad_clip = grad_clip
         self.vectorized = vectorized
+        # Tasks per chunk when the second-order graph is retained. Only used
+        # when first_order is False; see _meta_step_vectorized.
+        self.meta_chunk = meta_chunk
 
         self.inner_lrs: ParamDict | None = None
         trainable: list[torch.Tensor] = list(self.model.parameters())
@@ -216,40 +220,64 @@ class MAML:
             correct = (logits.argmax(-1) == qy).float().mean()
             return F.cross_entropy(logits, qy), correct
 
-        sx, sy, qx, qy = self._stack(episodes)
         lrs = self._current_lrs()
-
-        def meta_objective(p, lrs):
-            losses, accs = vmap(
-                per_task, in_dims=(None, None, 0, 0, 0, 0), randomness="different"
-            )(p, lrs, sx, sy, qx, qy)
-            return losses.mean(), accs.mean()
-
         params = {n: p for n, p in self.model.named_parameters()}
         argnums = (0, 1) if lrs is not None else 0
-        grads, (_, acc) = grad_and_value(meta_objective, argnums=argnums, has_aux=True)(
-            params, lrs
+
+        # Second-order meta-gradients keep the whole adaptation trajectory of
+        # every task in the meta-batch alive at once, which at 16 tasks and
+        # five inner steps reached ~7 GiB and exhausted a shared T4. Splitting
+        # the meta-batch into chunks bounds peak memory: each chunk's graph is
+        # released before the next is built, and the accumulated gradient is
+        # identical because the meta-objective is a mean over independent
+        # tasks. First-order runs detach the inner gradients, so they hold no
+        # trajectory and need no chunking.
+        chunk = len(episodes) if first_order else min(self.meta_chunk, len(episodes))
+
+        accumulated: ParamDict = {n: torch.zeros_like(p) for n, p in params.items()}
+        accumulated_lr: ParamDict | None = (
+            None if lrs is None else {n: torch.zeros_like(v) for n, v in lrs.items()}
         )
-        param_grads = grads[0] if lrs is not None else grads
+        total_loss = 0.0
+        total_acc = 0.0
+
+        for start in range(0, len(episodes), chunk):
+            block = episodes[start:start + chunk]
+            weight = len(block) / len(episodes)
+            bsx, bsy, bqx, bqy = self._stack(block)
+
+            def meta_objective(p, lrs, _sx=bsx, _sy=bsy, _qx=bqx, _qy=bqy):
+                losses, accs = vmap(
+                    per_task, in_dims=(None, None, 0, 0, 0, 0), randomness="different"
+                )(p, lrs, _sx, _sy, _qx, _qy)
+                return losses.mean(), accs.mean()
+
+            grads, (loss, acc) = grad_and_value(
+                meta_objective, argnums=argnums, has_aux=True
+            )(params, lrs)
+            param_grads = grads[0] if lrs is not None else grads
+
+            for name in accumulated:
+                accumulated[name] += param_grads[name] * weight
+            if accumulated_lr is not None:
+                for name in accumulated_lr:
+                    accumulated_lr[name] += grads[1][name] * weight
+            total_loss += float(loss) * weight
+            total_acc += float(acc) * weight
 
         self.optimizer.zero_grad(set_to_none=True)
         for name, p in self.model.named_parameters():
-            p.grad = param_grads[name]
-        if lrs is not None:
+            p.grad = accumulated[name]
+        if accumulated_lr is not None:
             for name, _ in self.model.named_parameters():
                 key = name.replace(".", "__")
                 # d/d(log lr) = lr * d/d(lr), by the chain rule through exp().
-                self._log_lrs[key].grad = grads[1][name] * lrs[name].detach()
+                self._log_lrs[key].grad = accumulated_lr[name] * lrs[name].detach()
         if self.grad_clip is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
         self.optimizer.step()
 
-        with torch.no_grad():
-            loss_value = meta_objective(
-                {n: p.detach() for n, p in self.model.named_parameters()},
-                None if lrs is None else {k: v.detach() for k, v in lrs.items()},
-            )[0]
-        return {"loss": float(loss_value), "accuracy": float(acc)}
+        return {"loss": total_loss, "accuracy": total_acc}
 
     def meta_step(self, episodes: list[Episode]) -> dict[str, float]:
         """One outer update over a meta-batch. Returns loss and accuracy."""

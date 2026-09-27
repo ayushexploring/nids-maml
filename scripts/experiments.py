@@ -263,6 +263,10 @@ def main(argv: list[str] | None = None) -> int:
     # processes makes every one of them slower.
     env["OMP_NUM_THREADS"] = "1"
     env["MKL_NUM_THREADS"] = "1"
+    # Concurrent workers share one card; expandable segments let an allocator
+    # give memory back rather than holding fragmented reserves that make a
+    # neighbouring process fail.
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     def launch(spec: dict, config_path: Path) -> None:
         nonlocal launched
