@@ -445,13 +445,28 @@ class MAML:
 
         params = {n: p.detach() for n, p in self.model.named_parameters()}
         results: list[dict] = []
-        for start in range(0, len(episodes), chunk):
+        start = 0
+        while start < len(episodes):
             block = episodes[start:start + chunk]
             sx, sy, qx, qy = self._stack(block)
-            with torch.enable_grad():
-                logits = vmap(
-                    per_task, in_dims=(None, None, 0, 0, 0), randomness="different"
-                )(params, lrs, sx, sy, qx)
+            try:
+                with torch.enable_grad():
+                    logits = vmap(
+                        per_task, in_dims=(None, None, 0, 0, 0),
+                        randomness="different",
+                    )(params, lrs, sx, sy, qx)
+            except torch.OutOfMemoryError:
+                # Evaluation adapts every episode in the block at once, so it
+                # can exhaust a shared card just as training can. Halve and
+                # retry rather than lose a run that has already finished
+                # meta-training.
+                if chunk <= 1:
+                    raise
+                chunk = max(1, chunk // 2)
+                torch.cuda.empty_cache()
+                log.warning("CUDA OOM during evaluation; retrying at chunk=%d",
+                            chunk)
+                continue
             with torch.no_grad():
                 probs = logits.softmax(-1)
                 preds = logits.argmax(-1)
@@ -466,6 +481,7 @@ class MAML:
                     "probs": probs[i].cpu().numpy(),
                     "loss": float(losses[i]),
                 })
+            start += len(block)
         return results
 
     @torch.enable_grad()
