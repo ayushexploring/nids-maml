@@ -294,6 +294,12 @@ def _level_of(result: dict, factor: str):
         "model": cfg["model"]["name"],
         "order": cfg["algorithm"]["name"],
         "learn_lr": cfg["algorithm"].get("learn_lr"),
+        # The proposed method has two components; this factor separates them so
+        # a gain can be attributed rather than claimed for the pair.
+        "component": "{}+{}".format(
+            cfg["algorithm"]["name"],
+            "diverse" if cfg["episodes"].get("diverse_support") else "uniform",
+        ),
     }
     if factor not in lookup:
         raise KeyError(

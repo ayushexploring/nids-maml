@@ -324,8 +324,8 @@ class MAML:
             if accumulated_lr is not None:
                 for name in accumulated_lr:
                     accumulated_lr[name] += grads[1][name] * weight
-            total_loss += float(loss) * weight
-            total_acc += float(acc) * weight
+            total_loss += float(loss.detach()) * weight
+            total_acc += float(acc.detach()) * weight
 
         self.optimizer.zero_grad(set_to_none=True)
         for name, p in self.model.named_parameters():
