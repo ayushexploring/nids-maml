@@ -31,7 +31,11 @@ from nids_maml.run import DEFAULTS, deep_merge, main as run_main  # noqa: E402
 
 log = logging.getLogger("experiments")
 
-SEEDS = [0, 1, 2, 3, 4]
+# Three seeds, not five. Three is enough for a confidence interval across
+# initialisations, and the matrix is resumable, so seeds 3 and 4 can be added
+# later by widening this list and re-issuing the same command -- completed runs
+# are skipped.
+SEEDS = [0, 1, 2]
 
 # --- Group 1: baselines ----------------------------------------------------
 # Every method is run on identical splits and identical episode streams, which
@@ -43,6 +47,12 @@ SEEDS = [0, 1, 2, 3, 4]
 # classical baselines sit early despite being less interesting: they need no
 # meta-training, so they cost a minute or two each and fill table rows almost
 # for free.
+# Protocol B (benign-vs-family binary episodes) and the adaptation curve cost
+# roughly 40% of a run's wall clock, and the manuscript needs them only for the
+# proposed method. Every other row of the baseline table is a 5-way accuracy,
+# so those runs skip both. LIGHT below applies that.
+LIGHT = {"evaluation": {"protocol_b": False, "adaptation_curve_steps": 0}}
+
 BASELINES = [
     {"experiment": "primary", "algorithm": {"name": "fomaml"}},
     # The control that matters most: same encoder, same label budget, ordinary
@@ -133,6 +143,9 @@ def build_matrix(groups: set[str]) -> list[dict]:
             spec = copy.deepcopy(spec)
             suffix = spec.pop("tag_suffix", None)
             algo = spec["algorithm"]["name"]
+            is_proposed = algo == "fomaml" and "model" not in spec
+            if not is_proposed:
+                spec = deep_merge(spec, copy.deepcopy(LIGHT))
             tag = f"primary_{algo.replace(':', '-')}"
             if suffix:
                 tag += f"_{suffix}"
@@ -144,6 +157,7 @@ def build_matrix(groups: set[str]) -> list[dict]:
                 spec = copy.deepcopy(level)
                 spec["experiment"] = f"ablation_{factor}"
                 spec.setdefault("train", {})["meta_steps"] = ABLATION_META_STEPS
+                spec = deep_merge(spec, copy.deepcopy(LIGHT))
                 value = _level_value(level)
                 tag = f"ablation_{factor}_{value}_seed{seed}"
                 runs.append({"overrides": spec, "seed": seed, "tag": _safe(tag)})
