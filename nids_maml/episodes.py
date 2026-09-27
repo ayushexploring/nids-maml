@@ -63,6 +63,8 @@ class EpisodeSampler:
         n_query: int = 15,
         classes: list[int] | None = None,
         seed: int | None = None,
+        diverse_support: bool = False,
+        candidate_pool: int = 128,
     ) -> None:
         self.X = X
         self.y = y
@@ -70,6 +72,8 @@ class EpisodeSampler:
         self.k_shot = k_shot
         self.n_query = n_query
         self.rng = np.random.default_rng(seed)
+        self.diverse_support = diverse_support
+        self.candidate_pool = candidate_pool
 
         needed = k_shot + n_query
         self._pool: dict[int, np.ndarray] = {}
@@ -103,12 +107,52 @@ class EpisodeSampler:
         """
         return len(self.classes) == self.n_way
 
+    def _select_support(self, drawn: np.ndarray) -> np.ndarray:
+        """Choose which of the drawn indices form the support set.
+
+        Uniform sampling on a redundant dataset tends to draw support instances
+        that are near-identical to one another, so a k-shot support set can
+        carry far less than k instances' worth of information about the class.
+        Farthest-point traversal instead picks instances that span the drawn
+        candidates: start from one at random, then repeatedly take whichever
+        candidate is furthest from everything chosen so far.
+
+        The query set is unaffected -- it is whatever remains -- so this changes
+        the task the model is given, not the population it is scored on.
+        """
+        if not self.diverse_support or self.k_shot >= len(drawn):
+            return drawn
+
+        points = self.X[drawn]
+        first = int(self.rng.integers(len(drawn)))
+        selected = [first]
+        distance = np.linalg.norm(points - points[first], axis=1)
+        for _ in range(self.k_shot - 1):
+            nxt = int(np.argmax(distance))
+            selected.append(nxt)
+            distance = np.minimum(distance, np.linalg.norm(points - points[nxt], axis=1))
+        rest = [i for i in range(len(drawn)) if i not in set(selected)]
+        return np.concatenate([drawn[selected], drawn[rest]])
+
+    def _draw(self, cid: int) -> np.ndarray:
+        """Indices for one class: k_shot support followed by n_query query."""
+        idx = self._pool[int(cid)]
+        needed = self.k_shot + self.n_query
+        if not self.diverse_support:
+            return self.rng.choice(idx, size=needed, replace=False)
+        # Draw a wider pool, pick a spanning support set from it, and take the
+        # query set from the remainder so the two stay disjoint.
+        pool = min(max(self.candidate_pool, needed), len(idx))
+        drawn = self.rng.choice(idx, size=pool, replace=False)
+        ordered = self._select_support(drawn)
+        return np.concatenate([ordered[:self.k_shot],
+                               ordered[self.k_shot:needed]])
+
     def sample(self) -> Episode:
         chosen = self.rng.choice(self.classes, size=self.n_way, replace=False)
         sx, sy, qx, qy = [], [], [], []
         for local_label, cid in enumerate(chosen):
-            idx = self._pool[int(cid)]
-            picked = self.rng.choice(idx, size=self.k_shot + self.n_query, replace=False)
+            picked = self._draw(cid)
             sx.append(self.X[picked[:self.k_shot]])
             qx.append(self.X[picked[self.k_shot:]])
             sy.append(np.full(self.k_shot, local_label, dtype=np.int64))

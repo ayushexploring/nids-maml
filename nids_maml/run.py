@@ -43,8 +43,9 @@ log = logging.getLogger("nids_maml")
 DEFAULTS: dict = {
     "experiment": "primary",
     "data": {
+        "name": "cicids2017",      # or unsw-nb15
         "path": None,              # None -> synthetic, for smoke tests
-        "classes": list(PRIMARY_CLASSES),
+        "classes": None,   # None -> the dataset's own default inventory
         "max_per_class": 60000,
         # None reproduces the conventional record-level protocol. Set to 2 for
         # the content-disjoint protocol; see data.deduplicate_indices.
@@ -55,7 +56,10 @@ DEFAULTS: dict = {
         "cache_dir": None,
         "split": {"train": 0.70, "val": 0.15, "test": 0.15},
     },
-    "episodes": {"n_way": 5, "k_shot": 5, "n_query": 15},
+    "episodes": {"n_way": 5, "k_shot": 5, "n_query": 15,
+                 # Select support instances that span the class rather than
+                 # drawing them uniformly; see episodes.EpisodeSampler.
+                 "diverse_support": False},
     "model": {
         "name": "transformer",
         "d_model": 128,
@@ -121,9 +125,11 @@ def load_data(cfg: dict) -> DatasetBundle:
         return make_synthetic(
             n_classes=max(cfg["episodes"]["n_way"], 5), seed=cfg["seed"]
         )
-    return load_cicids2017(
-        data_cfg["path"],
-        classes=tuple(data_cfg["classes"]),
+    from .data import load_dataset
+    return load_dataset(
+        data_cfg.get("name", "cicids2017"),
+        path=data_cfg["path"],
+        **({"classes": tuple(data_cfg["classes"])} if data_cfg.get("classes") else {}),
         split=SplitSpec(**data_cfg["split"]),
         seed=cfg["seed"],
         max_per_class=data_cfg.get("max_per_class"),
@@ -271,9 +277,10 @@ def main(argv: list[str] | None = None) -> int:
              fp, bundle.n_features, bundle.class_names)
 
     ep = cfg["episodes"]
+    diverse = ep.get("diverse_support", False)
     train_sampler = EpisodeSampler(
         bundle.X_train, bundle.y_train, ep["n_way"], ep["k_shot"], ep["n_query"],
-        seed=cfg["seed"],
+        seed=cfg["seed"], diverse_support=diverse,
     )
     val_sampler = EpisodeSampler(
         bundle.X_val, bundle.y_val, ep["n_way"], ep["k_shot"], ep["n_query"],

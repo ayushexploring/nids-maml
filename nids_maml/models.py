@@ -200,11 +200,18 @@ class FTTransformer(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, n_classes)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_features: bool = False) -> torch.Tensor:
+        """Class logits, or the penultimate representation.
+
+        ``return_features`` exposes the [CLS] representation without the
+        classification head, which prototype-anchored initialisation needs in
+        order to build a head from the support set before any adaptation step.
+        """
         h = self.slots(self.tokenizer(x))
         for block in self.blocks:
             h, _ = block(h)
-        return self.head(self.norm(h[:, 0]))  # [CLS] token
+        features = self.norm(h[:, 0])  # [CLS] token
+        return features if return_features else self.head(features)
 
     @torch.no_grad()
     def attention_maps(self, x: torch.Tensor) -> list[torch.Tensor]:
@@ -251,8 +258,9 @@ class MLPBaseline(nn.Module):
         self.head = nn.Linear(prev, n_classes)
         self.n_classes = n_classes
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.body(x))
+    def forward(self, x: torch.Tensor, return_features: bool = False) -> torch.Tensor:
+        features = self.body(x)
+        return features if return_features else self.head(features)
 
 
 class ConvEncoder(nn.Module):
@@ -282,9 +290,10 @@ class ConvEncoder(nn.Module):
         self.head = nn.Linear(prev, n_classes)
         self.n_classes = n_classes
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_features: bool = False) -> torch.Tensor:
         h = self.body(x.unsqueeze(1))
-        return self.head(self.pool(h).squeeze(-1))
+        features = self.pool(h).squeeze(-1)
+        return features if return_features else self.head(features)
 
 
 def build_model(name: str, n_features: int, n_classes: int, **kwargs) -> nn.Module:

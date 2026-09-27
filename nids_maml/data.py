@@ -595,3 +595,16 @@ def make_synthetic(
         feature_names=[f"f{i}" for i in range(n_features)],
         meta={"source": "synthetic", "seed": seed, "class_names": class_names},
     )
+
+
+def load_dataset(name: str, **kwargs) -> DatasetBundle:
+    """Dispatch to a dataset loader by name."""
+    key = name.strip().lower().replace("_", "-")
+    if key in ("cicids2017", "cic-ids2017", "cicids"):
+        return load_cicids2017(**kwargs)
+    if key in ("unsw-nb15", "unsw", "unswnb15"):
+        from .unsw import load_unsw_nb15
+        return load_unsw_nb15(**kwargs)
+    raise ValueError(
+        f"unknown dataset {name!r}; choose from cicids2017, unsw-nb15"
+    )

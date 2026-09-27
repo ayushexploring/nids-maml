@@ -59,6 +59,10 @@ class InnerConfig:
     first_order: bool = True
     # Per-parameter learned inner learning rates (MAML++ / Meta-SGD style).
     learn_lr: bool = False
+    # Build the classification head from support-set class prototypes before
+    # adapting, instead of carrying a task-agnostic random head into the inner
+    # loop. See prototype_head.
+    prototype_init: bool = False
 
 
 def adapt(
@@ -117,6 +121,52 @@ def adapt(
             trajectory.append(dict(current))
 
     return trajectory if return_trajectory else current
+
+
+def prototype_head(
+    model: nn.Module,
+    params: ParamDict,
+    buffers: ParamDict,
+    support_x: torch.Tensor,
+    support_y: torch.Tensor,
+    n_way: int,
+    head_weight: str = "head.weight",
+    head_bias: str = "head.bias",
+) -> ParamDict:
+    """Replace the classification head with one built from class prototypes.
+
+    A randomly initialised head carries no information about which output slot
+    belongs to which episode-local class, so the first inner-loop step is spent
+    discovering an arbitrary correspondence rather than learning anything about
+    the task. Measured on CIC-IDS2017, accuracy before adaptation sits at chance
+    and reaches its final value after a single step -- that step is the cost of
+    the ambiguity.
+
+    Setting ``W = 2P`` and ``b = -||P||^2``, where ``P`` holds the per-class mean
+    support embedding, makes the pre-adaptation logit for class c equal
+    ``-||z - P_c||^2 + ||z||^2``. The second term is constant across classes, so
+    the initial predictions are exactly those of a prototypical network, and the
+    inner loop refines that starting point instead of bootstrapping from noise.
+
+    Two baselines become special cases: zero inner steps with this head is a
+    prototypical network, and a random head with N steps is ordinary MAML.
+
+    The prototypes stay on the autograd graph, so the meta-gradient shapes the
+    encoder to produce representations whose class means are good classifiers.
+    """
+    features = functional_call(
+        model, {**params, **buffers}, (support_x,), {"return_features": True}
+    )
+    # One-hot means rather than boolean indexing: the latter has a
+    # data-dependent shape and cannot be mapped over a batch of tasks.
+    onehot = F.one_hot(support_y, n_way).to(features.dtype)
+    counts = onehot.sum(0).clamp(min=1.0).unsqueeze(-1)
+    prototypes = (onehot.T @ features) / counts
+
+    updated = dict(params)
+    updated[head_weight] = 2.0 * prototypes
+    updated[head_bias] = -(prototypes ** 2).sum(-1)
+    return updated
 
 
 class MAML:
@@ -214,7 +264,12 @@ class MAML:
         def support_loss(p, x, y):
             return F.cross_entropy(functional_call(model, {**p, **buffers}, (x,)), y)
 
+        n_way = int(episodes[0].n_way)
+        prototype = self.inner.prototype_init
+
         def per_task(p, lrs, sx, sy, qx, qy):
+            if prototype:
+                p = prototype_head(model, p, buffers, sx, sy, n_way)
             for _ in range(steps):
                 g = grad(support_loss)(p, sx, sy)
                 p = {
@@ -328,7 +383,11 @@ class MAML:
 
         for episode in episodes:
             sx, sy, qx, qy = self._to_torch(episode)
-            adapted = adapt(self.model, params, sx, sy, self.inner, lrs)
+            start = params
+            if self.inner.prototype_init:
+                start = prototype_head(self.model, params, buffers_of(self.model),
+                                       sx, sy, episode.n_way)
+            adapted = adapt(self.model, start, sx, sy, self.inner, lrs)
             logits = forward_with(self.model, adapted, qx)
             loss = F.cross_entropy(logits, qy) / len(episodes)
             # Backward per episode rather than accumulating the graph across
@@ -370,7 +429,12 @@ class MAML:
         def support_loss(p, x, y):
             return F.cross_entropy(functional_call(model, {**p, **buffers}, (x,)), y)
 
+        n_way = int(episodes[0].n_way)
+        prototype = self.inner.prototype_init
+
         def per_task(p, lrs, sx, sy, qx):
+            if prototype:
+                p = prototype_head(model, p, buffers, sx, sy, n_way)
             for _ in range(n_steps):
                 g = grad(support_loss)(p, sx, sy)
                 p = {
@@ -419,6 +483,7 @@ class MAML:
             lr=self.inner.lr,
             first_order=True,  # no meta-gradient is needed at evaluation time
             learn_lr=self.inner.learn_lr,
+            prototype_init=self.inner.prototype_init,
         )
         sx, sy, qx, qy = self._to_torch(episode)
         params = {n: p.detach() for n, p in self.model.named_parameters()}
@@ -428,6 +493,9 @@ class MAML:
         if lrs is not None:
             lrs = {k: v.detach() for k, v in lrs.items()}
 
+        if cfg.prototype_init:
+            params = prototype_head(self.model, params, buffers_of(self.model),
+                                    sx, sy, episode.n_way)
         adapted = adapt(self.model, params, sx, sy, cfg, lrs, create_graph=False)
         with torch.no_grad():
             logits = forward_with(self.model, adapted, qx)
@@ -599,6 +667,16 @@ def build_meta_learner(
     algorithm = algorithm.lower()
     if algorithm in ("maml", "fomaml"):
         inner.first_order = algorithm == "fomaml"
+        return MAML(model, inner, **kwargs)
+    if algorithm in ("proto-maml", "pamaml"):
+        # The proposed method: prototype-anchored head, first-order inner loop.
+        inner.first_order = True
+        inner.prototype_init = True
+        return MAML(model, inner, **kwargs)
+    if algorithm == "proto-maml2":
+        # Second-order variant, for the meta-gradient-order ablation.
+        inner.first_order = False
+        inner.prototype_init = True
         return MAML(model, inner, **kwargs)
     if algorithm == "reptile":
         inner.first_order = True

@@ -582,6 +582,151 @@ def test_second_order_chunking_is_exact():
     )
 
 
+@check("prototype-anchored adaptation reduces to a prototypical network at zero steps")
+def test_prototype_head_equals_protonet():
+    # The proposed method's central claim is that it generalises both
+    # baselines. Half of that claim is checkable exactly: with the inner loop
+    # disabled, its predictions must be those of a prototypical network.
+    from nids_maml.meta import ProtoNet
+
+    torch.manual_seed(0)
+    bundle = make_synthetic(n_classes=5, n_features=16, n_per_class=200, seed=0)
+    sampler = EpisodeSampler(bundle.X_test, bundle.y_test, 5, 5, 10, seed=1)
+    episodes = sampler.fixed_set(8, seed=2)
+
+    model = FTTransformer(16, 5, d_model=32, n_heads=4, n_blocks=2, dropout=0.0)
+    anchored = MAML(model, InnerConfig(steps=0, lr=0.1, prototype_init=True))
+    metric = ProtoNet(model)
+
+    for ep in episodes:
+        a = anchored.evaluate_episode(ep)
+        b = metric.evaluate_episode(ep)
+        assert np.array_equal(a["y_pred"], b["y_pred"]), (
+            "zero-step prototype-anchored predictions differ from ProtoNet"
+        )
+
+
+@check("prototype anchoring removes the wasted first adaptation step")
+def test_prototype_head_beats_random_at_zero_steps():
+    # With a random head, output slots carry no class correspondence, so
+    # pre-adaptation accuracy is at chance and the first inner step is spent
+    # resolving that. Anchoring should be well above chance before any step.
+    torch.manual_seed(0)
+    bundle = make_synthetic(n_classes=5, n_features=16, n_per_class=300,
+                            seed=0, separation=2.0)
+    sampler = EpisodeSampler(bundle.X_test, bundle.y_test, 5, 5, 10, seed=1)
+    episodes = sampler.fixed_set(15, seed=3)
+    model = FTTransformer(16, 5, d_model=32, n_heads=4, n_blocks=2, dropout=0.0)
+
+    def zero_step_accuracy(prototype_init: bool) -> float:
+        learner = MAML(model, InnerConfig(steps=0, lr=0.1,
+                                          prototype_init=prototype_init))
+        out = learner.evaluate_batch(episodes, steps=0)
+        return float(np.mean([(o["y_pred"] == o["y_true"]).mean() for o in out]))
+
+    random_head = zero_step_accuracy(False)
+    anchored = zero_step_accuracy(True)
+    assert random_head < 0.35, (
+        f"a random head scored {random_head:.3f} before adaptation; the test "
+        "assumes it is near the 0.20 chance level"
+    )
+    assert anchored > 0.6, (
+        f"prototype anchoring scored only {anchored:.3f} before adaptation, "
+        f"against {random_head:.3f} for a random head"
+    )
+
+
+@check("diverse support sampling keeps support and query disjoint and spreads support")
+def test_diverse_support_sampling():
+    bundle = make_synthetic(n_classes=5, n_features=20, n_per_class=400, seed=0)
+
+    def mean_spread(diverse: bool) -> float:
+        sampler = EpisodeSampler(bundle.X_train, bundle.y_train, 5, 5, 15,
+                                 seed=0, diverse_support=diverse)
+        spreads = []
+        for _ in range(20):
+            ep = sampler.sample()
+            # The property that must not break: drawing a spanning support set
+            # from a wider candidate pool must still leave the query set
+            # disjoint from it.
+            support = {row.tobytes() for row in ep.support_x}
+            query = {row.tobytes() for row in ep.query_x}
+            assert not (support & query), "support and query overlap"
+            assert len(ep.support_y) == 25 and len(ep.query_y) == 75
+            for c in range(5):
+                pts = ep.support_x[ep.support_y == c]
+                d = np.linalg.norm(pts[:, None] - pts[None], axis=-1)
+                spreads.append(d[np.triu_indices(len(pts), 1)].mean())
+        return float(np.mean(spreads))
+
+    uniform, diverse = mean_spread(False), mean_spread(True)
+    assert diverse > uniform * 1.1, (
+        f"diverse sampling spread {diverse:.3f} is not meaningfully above "
+        f"uniform {uniform:.3f}"
+    )
+
+
+@check("the UNSW-NB15 loader splits, encodes and never leaks the target")
+def test_unsw_loader():
+    import tempfile
+    import pandas as pd
+    from nids_maml.unsw import load_unsw_nb15
+    from nids_maml.data import fingerprint
+
+    rng = np.random.default_rng(0)
+    categories = ["Normal", "Generic", "Exploits", "Fuzzers", "DoS",
+                  "Reconnaissance", "Analysis", "Backdoors", "Shellcode", "Worms"]
+    rows = []
+    for name in categories:
+        for _ in range(120):
+            rows.append({
+                "id": len(rows),
+                "dur": float(abs(rng.normal(1, 0.5))),
+                "sbytes": float(rng.integers(0, 10000)),
+                "dbytes": float(rng.integers(0, 10000)),
+                "proto": rng.choice(["tcp", "udp", "arp"]),
+                "service": rng.choice(["-", "dns", "http"]),
+                "state": rng.choice(["FIN", "INT", "CON"]),
+                "srcip": "10.0.0.1",
+                "attack_cat": "" if name == "Normal" else name,
+                "label": 0 if name == "Normal" else 1,
+            })
+
+    with tempfile.TemporaryDirectory() as tmp:
+        csv = pathlib.Path(tmp) / "unsw.csv"
+        pd.DataFrame(rows).to_csv(csv, index=False)
+        bundle = load_unsw_nb15(csv, seed=0, max_per_class=None)
+
+        # "Backdoors" and "Backdoor" must unify; empty attack_cat is Normal.
+        assert "Backdoor" in bundle.class_names
+        assert "Backdoors" not in bundle.class_names
+        assert "Normal" in bundle.class_names
+        assert len(bundle.class_names) == 10, bundle.class_names
+
+        # The binary label and identifiers must not survive as features.
+        for banned in ("label", "id", "srcip", "attack_cat"):
+            assert not any(f == banned or f.startswith(banned + "=")
+                           for f in bundle.feature_names), f"{banned} leaked"
+
+        # Categoricals became one-hot columns.
+        assert any(f.startswith("proto=") for f in bundle.feature_names)
+
+        # Splits are disjoint and the class pool is large enough that 5-way
+        # episodes are not degenerate, unlike the CIC-IDS2017 copy.
+        rows_seen = set()
+        for X in (bundle.X_train, bundle.X_val, bundle.X_test):
+            for row in X:
+                rows_seen.add(row.tobytes())
+        total = len(bundle.y_train) + len(bundle.y_val) + len(bundle.y_test)
+        assert len(rows_seen) == total, "a row appears in more than one split"
+
+        sampler = EpisodeSampler(bundle.X_train, bundle.y_train, 5, 5, 10, seed=0)
+        assert not sampler.is_degenerate, (
+            "10 classes under a 5-way protocol should not be degenerate"
+        )
+        assert fingerprint(bundle)
+
+
 if __name__ == "__main__":
     print()
     print(f"{len(PASSED)} passed, {len(FAILED)} failed")
