@@ -24,6 +24,7 @@ import logging
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,27 @@ def build_plan() -> list[tuple[str, str, int]]:
     return plan
 
 
+def checkpoint(out: Path) -> None:
+    """Zip every completed result into a single file that stays current.
+
+    On Kaggle a Draft Session's files under /kaggle/working are downloadable
+    live from the notebook's Output pane, without committing a version. Keeping
+    one up-to-date archive there means results already on disk can be pulled
+    out at any moment -- including right before closing the tab -- with no
+    dependency on the session surviving or on API credentials.
+    """
+    archive = out / "results_checkpoint.zip"
+    tmp = out / "results_checkpoint.tmp.zip"
+    json_files = sorted(out.glob("*.json"))
+    if not json_files:
+        return
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in json_files:
+            zf.write(f, arcname=f.name)
+    tmp.replace(archive)
+    log.info("      checkpoint -> %s (%d result files)", archive, len(json_files))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-path", required=True)
@@ -76,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     limit = args.max_hours * 3600 if args.max_hours else None
     completed, skipped, failed = 0, 0, []
+    checkpoint(out)
 
     for index, (cfg, tag, seed) in enumerate(plan, 1):
         if (out / f"{tag}.json").exists():
@@ -115,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         elapsed = (time.time() - started) / 60
         log.info("      %.0f min elapsed, %d done / %d skipped / %d failed",
                  elapsed, completed, skipped, len(failed))
+        checkpoint(out)
 
     log.info("finished: %d completed, %d skipped, %d failed",
              completed, skipped, len(failed))
