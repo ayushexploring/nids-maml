@@ -1,0 +1,43 @@
+# UNSW-NB15, 5-way 5-shot. Ten classes means episodes draw a different subset
+# each time and families are genuinely unseen at meta-test time, unlike the
+# five-class CIC-IDS2017 copy where every episode poses the same problem.
+#
+# Committed rather than written ad hoc in a session: a Colab VM is disposable,
+# and a config that lives only in /content disappears with it, which silently
+# fails any queued run that references it.
+# The proposed method: prototype-anchored head, uniform support sampling.
+# Diversity-aware sampling is deliberately off -- the component ablation
+# measured it at -1.32 points on CIC-IDS2017.
+experiment: unsw
+data:
+  name: unsw-nb15
+  path: null
+  max_per_class: 60000
+episodes:
+  n_way: 5
+  k_shot: 5
+  n_query: 15
+  diverse_support: false
+model:
+  name: transformer
+  d_model: 128
+  n_heads: 4
+  n_blocks: 3
+  dropout: 0.1
+algorithm:
+  name: proto-maml
+  inner_steps: 5
+  inner_lr: 0.1
+  meta_lr: 0.001
+train:
+  meta_steps: 3000
+  meta_batch_size: 16
+  eval_every: 100
+  eval_episodes: 200
+  patience: 8
+  min_delta: 0.002
+evaluation:
+  test_episodes: 600
+  adaptation_curve_steps: 10
+  protocol_b: false
+seed: 0
