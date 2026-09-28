@@ -727,6 +727,86 @@ def test_unsw_loader():
         assert fingerprint(bundle)
 
 
+@check("robust prototype estimators agree with the mean on clean classes")
+def test_prototype_estimators_agree_when_clean():
+    # Every estimator must reduce to the arithmetic mean when a class is a
+    # compact symmetric cloud. If they did not, a gain on messy data could not
+    # be attributed to robustness rather than to a different inductive bias.
+    from nids_maml.meta import class_prototypes
+
+    torch.manual_seed(0)
+    n_way, per_class, d = 4, 40, 16
+    centres = torch.randn(n_way, d) * 4.0
+    feats, labels = [], []
+    for c in range(n_way):
+        feats.append(centres[c] + torch.randn(per_class, d) * 0.15)
+        labels.append(torch.full((per_class,), c))
+    feats, labels = torch.cat(feats), torch.cat(labels)
+
+    mean = class_prototypes(feats, labels, n_way, "mean")
+    for est in ("medoid", "trimmed", "attention"):
+        got = class_prototypes(feats, labels, n_way, est)
+        assert got.shape == (n_way, d)
+        drift = (got - mean).norm(dim=-1).max().item()
+        spread = (feats - mean[labels]).norm(dim=-1).mean().item()
+        assert drift < spread, (
+            f"{est} moved the prototype {drift:.3f} from the mean, which "
+            f"exceeds the within-class spread {spread:.3f} on clean data"
+        )
+
+
+@check("robust prototype estimators resist a contaminated support set")
+def test_prototype_estimators_resist_outliers():
+    # The motivating case: a support set drawn from a redundant, bursty class
+    # where one instance is far from the rest. The mean is dragged toward it;
+    # the robust estimators should not be.
+    from nids_maml.meta import class_prototypes
+
+    torch.manual_seed(0)
+    d = 16
+    truth = torch.zeros(d)
+    clean = truth + torch.randn(8, d) * 0.1
+    outlier = truth + 30.0                      # one wildly distant instance
+    feats = torch.cat([clean, outlier.unsqueeze(0)])
+    labels = torch.zeros(len(feats), dtype=torch.long)
+
+    errors = {}
+    for est in ("mean", "medoid", "trimmed", "attention"):
+        proto = class_prototypes(feats, labels, 1, est)[0]
+        errors[est] = (proto - truth).norm().item()
+
+    for est in ("medoid", "trimmed", "attention"):
+        assert errors[est] < errors["mean"], (
+            f"{est} error {errors[est]:.3f} is no better than the mean's "
+            f"{errors['mean']:.3f} on a contaminated support set"
+        )
+    assert errors["trimmed"] < errors["mean"] / 2, (
+        f"trimming should largely remove one outlier in nine; "
+        f"error {errors['trimmed']:.3f} against mean {errors['mean']:.3f}"
+    )
+
+
+@check("robust prototypes stay differentiable and vmap-safe")
+def test_prototype_estimators_differentiable():
+    # The meta-gradient flows through the prototype, so every estimator must
+    # carry gradient, and must survive being mapped over a batch of tasks.
+    from torch.func import vmap
+    from nids_maml.meta import class_prototypes
+
+    for est in ("mean", "medoid", "trimmed", "attention"):
+        feats = torch.randn(20, 8, requires_grad=True)
+        labels = torch.arange(4).repeat(5)
+        loss = class_prototypes(feats, labels, 4, est).sum()
+        loss.backward()
+        assert feats.grad is not None and torch.isfinite(feats.grad).all(), (
+            f"{est} produced no usable gradient"
+        )
+
+        batched = vmap(lambda f, l: class_prototypes(f, l, 4, est))
+        out = batched(torch.randn(3, 20, 8), labels.expand(3, 20))
+        assert out.shape == (3, 4, 8), f"{est} broke under vmap: {out.shape}"
+
+
 if __name__ == "__main__":
     print()
     print(f"{len(PASSED)} passed, {len(FAILED)} failed")

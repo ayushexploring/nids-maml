@@ -63,6 +63,9 @@ class InnerConfig:
     # adapting, instead of carrying a task-agnostic random head into the inner
     # loop. See prototype_head.
     prototype_init: bool = False
+    # How a class is summarised when prototype_init is set: mean, medoid,
+    # trimmed or attention. See class_prototypes.
+    prototype_estimator: str = "mean"
 
 
 def adapt(
@@ -123,6 +126,117 @@ def adapt(
     return trajectory if return_trajectory else current
 
 
+def class_prototypes(
+    features: torch.Tensor,
+    labels: torch.Tensor,
+    n_way: int,
+    estimator: str = "mean",
+    trim: float = 0.2,
+    temperature: float = 1.0,
+) -> torch.Tensor:
+    """Summarise each class of a support set as a single point in feature space.
+
+    The arithmetic mean is the usual choice, and it is the right one when a
+    class is a compact, roughly symmetric cloud. Network flow data is neither.
+    Attack families are generated in bursts, so a support set drawn from one is
+    dominated by whichever burst happened to be sampled, and the features
+    themselves are heavy-tailed even after winsorising -- byte and packet counts
+    span orders of magnitude within a single family. Under those conditions a
+    mean is pulled toward whichever sub-population is over-represented in the
+    five instances that happened to be drawn.
+
+    The alternatives below summarise a class in ways that are less sensitive to
+    that. All are differentiable, so the meta-gradient still shapes the encoder
+    through them, and all reduce to the mean when a class is compact and
+    symmetric, so nothing is given up in the easy case.
+
+    Args:
+        features: ``(n_support, d)`` support embeddings.
+        labels: ``(n_support,)`` episode-local class indices.
+        n_way: number of classes.
+        estimator: one of
+
+            ``mean``
+                arithmetic mean.
+            ``medoid``
+                a soft medoid: each instance is weighted by how close it is to
+                the rest of its class, so an outlier contributes little. Uses a
+                softmax over negative mean distance rather than a hard argmin,
+                which keeps it differentiable.
+            ``trimmed``
+                trimmed mean: the ``trim`` fraction of instances furthest from
+                their class mean are down-weighted to zero, and the mean is
+                taken over the rest. A first pass is needed to find the centre,
+                so this costs one extra distance computation.
+            ``attention``
+                instances are weighted by softmax over their negative distance
+                to the class mean, scaled by ``temperature``. Between the mean
+                (temperature to infinity) and the medoid (temperature to zero).
+
+        trim: fraction discarded by the ``trimmed`` estimator.
+        temperature: scale for ``attention`` and ``medoid`` weights. Larger
+            values approach the plain mean.
+
+    Returns:
+        ``(n_way, d)`` prototypes.
+
+    Every branch is written with one-hot masks and full-matrix distances rather
+    than per-class indexing, because a data-dependent shape cannot be mapped
+    over a batch of tasks.
+    """
+    onehot = F.one_hot(labels, n_way).to(features.dtype)     # (n_support, n_way)
+    counts = onehot.sum(0).clamp(min=1.0).unsqueeze(-1)      # (n_way, 1)
+    mean = (onehot.T @ features) / counts
+
+    if estimator == "mean":
+        return mean
+
+    if estimator not in ("medoid", "trimmed", "attention"):
+        raise ValueError(
+            f"unknown prototype estimator {estimator!r}; choose from "
+            "mean, medoid, trimmed, attention"
+        )
+
+    if estimator == "medoid":
+        # Mean distance from each instance to the others of its own class.
+        pairwise = torch.cdist(features, features)                  # (n, n)
+        same = onehot @ onehot.T                                    # 1 where same class
+        within = (pairwise * same).sum(-1) / same.sum(-1).clamp(min=1.0)
+        logits = -within.unsqueeze(-1) / temperature                # (n, 1)
+    else:
+        # Distance from each instance to its own class mean.
+        to_mean = torch.cdist(features, mean)                       # (n, n_way)
+        own = (to_mean * onehot).sum(-1, keepdim=True)              # (n, 1)
+        if estimator == "attention":
+            logits = -own / temperature
+        else:
+            # Trimmed: rank within class by distance and drop the tail. The
+            # comparison is against a per-class quantile computed with the
+            # same masking, so no per-class indexing is needed.
+            k = (counts.squeeze(-1) * (1.0 - trim)).ceil()          # keep count
+            ranks = _within_class_rank(own.squeeze(-1), onehot)
+            keep = (ranks < (onehot @ k)).to(features.dtype)
+            weights = keep.unsqueeze(-1) * onehot
+            kept = weights.sum(0).clamp(min=1.0).unsqueeze(-1)
+            return (weights.T @ features) / kept
+
+    # Softmax within each class: mask other classes to -inf before the softmax.
+    masked = logits + torch.log(onehot.clamp(min=1e-20))            # (n, n_way)
+    weights = masked.softmax(dim=0)
+    return weights.T @ features
+
+
+def _within_class_rank(values: torch.Tensor, onehot: torch.Tensor) -> torch.Tensor:
+    """Rank of each instance among those sharing its class, smallest first.
+
+    Computed by counting how many same-class instances have a smaller value,
+    which avoids a sort with a data-dependent shape and stays vmap-safe.
+    """
+    same = onehot @ onehot.T
+    smaller = (values.unsqueeze(0) < values.unsqueeze(1)).to(values.dtype)
+    return (smaller * same).sum(-1)
+
+
 def prototype_head(
     model: nn.Module,
     params: ParamDict,
@@ -132,6 +246,7 @@ def prototype_head(
     n_way: int,
     head_weight: str = "head.weight",
     head_bias: str = "head.bias",
+    estimator: str = "mean",
 ) -> ParamDict:
     """Replace the classification head with one built from class prototypes.
 
@@ -152,16 +267,16 @@ def prototype_head(
     prototypical network, and a random head with N steps is ordinary MAML.
 
     The prototypes stay on the autograd graph, so the meta-gradient shapes the
-    encoder to produce representations whose class means are good classifiers.
+    encoder to produce representations whose class summaries are good
+    classifiers.
+
+    ``estimator`` selects how a class is summarised; see
+    :func:`class_prototypes`.
     """
     features = functional_call(
         model, {**params, **buffers}, (support_x,), {"return_features": True}
     )
-    # One-hot means rather than boolean indexing: the latter has a
-    # data-dependent shape and cannot be mapped over a batch of tasks.
-    onehot = F.one_hot(support_y, n_way).to(features.dtype)
-    counts = onehot.sum(0).clamp(min=1.0).unsqueeze(-1)
-    prototypes = (onehot.T @ features) / counts
+    prototypes = class_prototypes(features, support_y, n_way, estimator)
 
     updated = dict(params)
     updated[head_weight] = 2.0 * prototypes
@@ -266,10 +381,12 @@ class MAML:
 
         n_way = int(episodes[0].n_way)
         prototype = self.inner.prototype_init
+        estimator = self.inner.prototype_estimator
 
         def per_task(p, lrs, sx, sy, qx, qy):
             if prototype:
-                p = prototype_head(model, p, buffers, sx, sy, n_way)
+                p = prototype_head(model, p, buffers, sx, sy, n_way,
+                                   estimator=estimator)
             for _ in range(steps):
                 g = grad(support_loss)(p, sx, sy)
                 p = {
@@ -386,7 +503,8 @@ class MAML:
             start = params
             if self.inner.prototype_init:
                 start = prototype_head(self.model, params, buffers_of(self.model),
-                                       sx, sy, episode.n_way)
+                                       sx, sy, episode.n_way,
+                                       estimator=self.inner.prototype_estimator)
             adapted = adapt(self.model, start, sx, sy, self.inner, lrs)
             logits = forward_with(self.model, adapted, qx)
             loss = F.cross_entropy(logits, qy) / len(episodes)
@@ -431,10 +549,12 @@ class MAML:
 
         n_way = int(episodes[0].n_way)
         prototype = self.inner.prototype_init
+        estimator = self.inner.prototype_estimator
 
         def per_task(p, lrs, sx, sy, qx):
             if prototype:
-                p = prototype_head(model, p, buffers, sx, sy, n_way)
+                p = prototype_head(model, p, buffers, sx, sy, n_way,
+                                   estimator=estimator)
             for _ in range(n_steps):
                 g = grad(support_loss)(p, sx, sy)
                 p = {
@@ -500,6 +620,7 @@ class MAML:
             first_order=True,  # no meta-gradient is needed at evaluation time
             learn_lr=self.inner.learn_lr,
             prototype_init=self.inner.prototype_init,
+            prototype_estimator=self.inner.prototype_estimator,
         )
         sx, sy, qx, qy = self._to_torch(episode)
         params = {n: p.detach() for n, p in self.model.named_parameters()}
@@ -511,7 +632,8 @@ class MAML:
 
         if cfg.prototype_init:
             params = prototype_head(self.model, params, buffers_of(self.model),
-                                    sx, sy, episode.n_way)
+                                    sx, sy, episode.n_way,
+                                    estimator=cfg.prototype_estimator)
         adapted = adapt(self.model, params, sx, sy, cfg, lrs, create_graph=False)
         with torch.no_grad():
             logits = forward_with(self.model, adapted, qx)

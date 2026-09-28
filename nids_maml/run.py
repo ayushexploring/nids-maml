@@ -79,6 +79,9 @@ DEFAULTS: dict = {
         # to a linear stack. Measured as ablation F3.
         "inner_lr": 0.1,
         "learn_lr": False,
+        # mean | medoid | trimmed | attention -- only used when the algorithm
+        # builds its head from prototypes.
+        "prototype_estimator": "mean",
         "meta_lr": 0.001,
         "weight_decay": 1e-5,
         "grad_clip": 1.0,
@@ -149,6 +152,7 @@ def build_learner(cfg: dict, bundle: DatasetBundle, device: torch.device):
         steps=cfg["algorithm"]["inner_steps"],
         lr=cfg["algorithm"]["inner_lr"],
         learn_lr=cfg["algorithm"].get("learn_lr", False),
+        prototype_estimator=cfg["algorithm"].get("prototype_estimator", "mean"),
     )
     shared = {
         "meta_lr": cfg["algorithm"]["meta_lr"],

@@ -1,0 +1,28 @@
+# CIC + prototype estimator 'trimmed'
+#
+# Robust prototype estimator: intrusion flows arrive in bursts, so a five-shot
+# support set is dominated by whichever burst was sampled, and the features are
+# heavy-tailed even after winsorising. A class mean is pulled toward the
+# over-represented sub-population; these estimators are not.
+experiment: robust_cic
+data:
+  name: cicids2017
+  path: null
+  max_per_class: 60000
+episodes: {n_way: 5, k_shot: 5, n_query: 15, diverse_support: false}
+model: {name: transformer, d_model: 128, n_heads: 4, n_blocks: 3, dropout: 0.1}
+algorithm:
+  name: proto-maml
+  inner_steps: 5
+  inner_lr: 0.1
+  meta_lr: 0.001
+  prototype_estimator: trimmed
+train:
+  meta_steps: 3000
+  meta_batch_size: 16
+  eval_every: 100
+  eval_episodes: 200
+  patience: 8
+  min_delta: 0.002
+evaluation: {test_episodes: 600, adaptation_curve_steps: 10, protocol_b: false}
+seed: 0
